@@ -1,2 +1,22 @@
-skills/
+# Dependencies and build outputs
 node_modules/
+.next/
+dist/
+build/
+release/
+coverage/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Local databases and generated files
+db/*.db
+*.sqlite
+*.sqlite3
+
+# Local/editor files
+skills/
+.DS_Store
+Thumbs.db
