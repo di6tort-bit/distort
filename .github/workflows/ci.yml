@@ -1,0 +1,18 @@
+name: CI
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate extension manifest and preview claims
+        run: npm run test:extension
+      - name: Run project tests
+        run: npm test
