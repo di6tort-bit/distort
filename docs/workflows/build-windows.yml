@@ -1,0 +1,41 @@
+# Copy this file to .github/workflows/build-windows.yml
+name: Build DISTORT Windows .exe
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with: { bun-version: latest }
+      - name: Install root deps
+        run: bun install
+      - name: Build Next.js
+        run: bun run build
+      - name: Install desktop deps
+        working-directory: desktop
+        run: bun install
+      - name: Generate icons
+        working-directory: desktop
+        run: bun run build-icons.mjs
+      - name: Download xray-core
+        working-directory: desktop
+        run: |
+          mkdir -p resources/bin
+          cd resources/bin
+          curl -sL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip
+          unzip -o xray.zip
+          rm xray.zip
+      - name: Build
+        working-directory: desktop
+        run: |
+          bun run build:desktop
+          bunx electron-builder --win nsis portable --x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DISTORT-Windows
+          path: desktop/release/DISTORT-*.exe
