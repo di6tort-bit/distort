@@ -6,13 +6,23 @@ const electron_1 = require("electron");
 electron_1.contextBridge.exposeInMainWorld("distort", {
     // VPN
     vpn: {
-        connect: (server, protocol) => electron_1.ipcRenderer.invoke("vpn:connect", server, protocol),
+        connect: (server, protocol, configUri) => electron_1.ipcRenderer.invoke("vpn:connect", server, protocol, configUri),
         disconnect: () => electron_1.ipcRenderer.invoke("vpn:disconnect"),
         getState: () => electron_1.ipcRenderer.invoke("vpn:state"),
         onStateChange: (cb) => {
             const handler = (_e, state) => cb(state);
             electron_1.ipcRenderer.on("vpn:state-changed", handler);
             return () => electron_1.ipcRenderer.removeListener("vpn:state-changed", handler);
+        },
+        onError: (cb) => {
+            const handler = (_e, err) => cb(err);
+            electron_1.ipcRenderer.on("vpn:error", handler);
+            return () => electron_1.ipcRenderer.removeListener("vpn:error", handler);
+        },
+        onKillSwitch: (cb) => {
+            const handler = () => cb();
+            electron_1.ipcRenderer.on("vpn:kill-switch-activated", handler);
+            return () => electron_1.ipcRenderer.removeListener("vpn:kill-switch-activated", handler);
         },
     },
     // Settings

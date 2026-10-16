@@ -6,13 +6,24 @@ import { contextBridge, ipcRenderer } from "electron";
 contextBridge.exposeInMainWorld("distort", {
   // VPN
   vpn: {
-    connect: (server: unknown, protocol: string) => ipcRenderer.invoke("vpn:connect", server, protocol),
+    connect: (server: unknown, protocol: string, configUri?: string) =>
+      ipcRenderer.invoke("vpn:connect", server, protocol, configUri),
     disconnect: () => ipcRenderer.invoke("vpn:disconnect"),
     getState: () => ipcRenderer.invoke("vpn:state"),
     onStateChange: (cb: (state: unknown) => void) => {
       const handler = (_e: unknown, state: unknown) => cb(state);
       ipcRenderer.on("vpn:state-changed", handler);
       return () => ipcRenderer.removeListener("vpn:state-changed", handler);
+    },
+    onError: (cb: (error: string) => void) => {
+      const handler = (_e: unknown, err: string) => cb(err);
+      ipcRenderer.on("vpn:error", handler);
+      return () => ipcRenderer.removeListener("vpn:error", handler);
+    },
+    onKillSwitch: (cb: () => void) => {
+      const handler = () => cb();
+      ipcRenderer.on("vpn:kill-switch-activated", handler);
+      return () => ipcRenderer.removeListener("vpn:kill-switch-activated", handler);
     },
   },
   // Settings

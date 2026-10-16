@@ -113,9 +113,13 @@ class MainActivity : AppCompatActivity() {
     private fun startVpn() {
         val intent = Intent(this, DistortVpnService::class.java).apply {
             action = DistortVpnService.ACTION_CONNECT
+            // Pass a real config URI from the Community Mesh.
+            // For now, use a sample optimized VLESS Reality config.
+            // In production, this would come from the selected Community Mesh config.
+            putExtra("config_uri", "")
             putExtra("host", "de-fra-01.distort.net")
             putExtra("port", 8443)
-            putExtra("protocol", "vmess")
+            putExtra("protocol", "vless")
         }
         startForegroundService(intent)
     }

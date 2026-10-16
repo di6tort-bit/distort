@@ -117,18 +117,96 @@ async function clearProxy() {
   });
 }
 
+// Verify that the proxy is actually forwarding traffic.
+// Does a real HTTP request through the proxy to a known-good endpoint.
+async function verifyProxyWorks(server) {
+  // We can't directly test the VPN tunnel from the SW, but we CAN verify
+  // that Chrome is now routing requests through the proxy by checking
+  // if a request to the proxy's SOCKS port succeeds.
+  try {
+    // Quick check: fetch a lightweight endpoint through the proxy.
+    // If the proxy is broken, this will fail or timeout.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch('https://www.google.com/generate_204', {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    // generate_204 returns 204 on success
+    return res.status === 204 || res.ok;
+  } catch (err) {
+    console.warn('proxy verification fetch failed:', err.message);
+    // If the fetch fails, it might be because:
+    // 1. The proxy is broken (real failure)
+    // 2. The proxy is working but google is blocked (common in Iran)
+    // We can't distinguish, so be conservative: only return true if
+    // we got ANY response (even an error status), which means the proxy
+    // is at least routing traffic.
+    if (err.name === 'AbortError') {
+      // Timeout — proxy may be slow or broken
+      return false;
+    }
+    // Other errors (TypeError) mean the fetch itself failed,
+    // which usually means the proxy isn't routing at all.
+    return false;
+  }
+}
+
 // --- Connect / Disconnect handlers ------------------------------------------
 async function handleConnect(message) {
   const { server, protocol, stealth } = message;
   if (!server || !server.host || !server.port) {
     throw new Error('Invalid server payload');
   }
+
+  // Mark as "connecting" while we attempt the proxy
+  await setState({
+    connected: false,
+    connecting: true,
+    serverId: server.id,
+    protocol: protocol || 'wireguard',
+    stealth: !!stealth,
+    sessionStart: null,
+    error: null,
+  });
+  await updateBadge(false);
+
+  // Apply the proxy — if this fails, do NOT mark as connected.
   try {
     await applyProxy(server.host, server.port, protocol || 'wireguard', !!stealth);
   } catch (err) {
-    // Proxy apply may fail in dev/test contexts — log but continue.
-    console.warn('applyProxy failed:', err.message);
+    // Proxy apply failed — mark as error, NOT connected.
+    console.error('applyProxy failed:', err.message);
+    await setState({
+      connected: false,
+      connecting: false,
+      error: `Proxy setup failed: ${err.message}`,
+      serverId: null,
+      sessionStart: null,
+    });
+    await updateBadge(false);
+    await notify('DISTORT — Connection failed', err.message);
+    return { ok: false, error: err.message };
   }
+
+  // Proxy was applied successfully — now verify it's actually working
+  // by doing a quick reachability check through the proxy.
+  const verified = await verifyProxyWorks(server);
+  if (!verified) {
+    // Proxy was set but verification failed — don't claim "connected"
+    console.warn('Proxy applied but verification failed — server may be unreachable');
+    await setState({
+      connected: false,
+      connecting: false,
+      error: 'Proxy set but server unreachable',
+      sessionStart: null,
+    });
+    await updateBadge(false);
+    return { ok: false, error: 'Server unreachable through proxy' };
+  }
+
+  // All checks passed — mark as connected
   await setState({
     connected: true,
     connecting: false,
@@ -140,6 +218,7 @@ async function handleConnect(message) {
     bytesUp: 0,
     downSpeed: 0,
     upSpeed: 0,
+    error: null,
   });
   await updateBadge(true);
   await notify('Distort connected', `${server.country} · ${server.city} (${(protocol || 'wireguard').toUpperCase()})`);

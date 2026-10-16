@@ -222,117 +222,32 @@ function getWintunPath() {
     }
     return path.join(process.resourcesPath, "bin", "wintun.dll");
 }
-// Build an xray config for the given protocol + server
-function buildXrayConfig(server, protocol) {
+// Build a REAL xray config using real credentials from a Community Mesh URI.
+// Falls back to a clear error if no real URI is provided — NO fake credentials.
+function buildXrayConfig(server, protocol, configUri) {
     if (!server)
         throw new Error("No server selected");
-    const logPath = path.join(electron_1.app.getPath("userData"), "xray.log");
-    const socksInbound = {
-        tag: "socks-in",
-        port: 10808,
-        listen: "127.0.0.1",
-        protocol: "socks",
-        settings: { auth: "noauth", udp: true },
-    };
-    const httpInbound = {
-        tag: "http-in",
-        port: 10809,
-        listen: "127.0.0.1",
-        protocol: "http",
-    };
-    // Default: VMess over WS+TLS (most Iran-resilient)
-    const outbounds = [];
-    if (protocol === "wireguard") {
-        // Use xray's wireguard outbound
-        outbounds.push({
-            tag: "distort-out",
-            protocol: "wireguard",
-            settings: {
-                secret: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-                address: ["10.66.66.2/32", "fd42:dead:beef::2/128"],
-                peers: [{ publicKey: "serverPubKey", endpoint: `${server.host}:${server.port}` }],
-                mtu: 1420,
-            },
-        });
+    // If we have a real Community Mesh URI, use ITS credentials (not fakes).
+    if (configUri && typeof configUri === "string" && configUri.length > 10) {
+        // Inline import to avoid circular deps
+        const { parseUriToRealConfig, buildRealXrayConfig } = require("./real-xray-config");
+        const realCfg = parseUriToRealConfig(configUri);
+        if (realCfg) {
+            const settings = store.get("settings");
+            return buildRealXrayConfig(realCfg, {
+                tun: true, // system-wide tunnel via wintun.dll
+                socksPort: 10808,
+                httpPort: 10809,
+                dnsLeakProtection: settings.dnsLeakProtection !== false,
+            });
+        }
+        throw new Error("Could not parse the provided config URI");
     }
-    else if (protocol === "v2ray" || protocol === "vmess") {
-        outbounds.push({
-            tag: "distort-out",
-            protocol: "vmess",
-            settings: {
-                vnext: [
-                    {
-                        address: server.host,
-                        port: server.port,
-                        users: [{ id: crypto.randomUUID(), alterId: 0, security: "auto" }],
-                    },
-                ],
-            },
-            streamSettings: {
-                network: "ws",
-                security: "tls",
-                tlsSettings: { serverName: server.host, allowInsecure: false },
-                wsSettings: { path: "/distort", headers: { Host: server.host } },
-            },
-            mux: { enabled: true, concurrency: 8 },
-        });
-    }
-    else if (protocol === "trojan") {
-        outbounds.push({
-            tag: "distort-out",
-            protocol: "trojan",
-            settings: {
-                servers: [
-                    {
-                        address: server.host,
-                        port: server.port,
-                        password: "distort-trojan-pass",
-                    },
-                ],
-            },
-            streamSettings: {
-                network: "tcp",
-                security: "tls",
-                tlsSettings: { serverName: server.host, allowInsecure: false },
-            },
-        });
-    }
-    else if (protocol === "shadowsocks") {
-        outbounds.push({
-            tag: "distort-out",
-            protocol: "shadowsocks",
-            settings: {
-                servers: [
-                    {
-                        address: server.host,
-                        port: server.port,
-                        method: "chacha20-ietf-poly1305",
-                        password: "distort-ss-pass",
-                    },
-                ],
-            },
-        });
-    }
-    else {
-        // fallback: freedom (direct)
-        outbounds.push({ tag: "distort-out", protocol: "freedom" });
-    }
-    // Block ads + trackers if enabled
-    outbounds.push({ tag: "block", protocol: "blackhole" });
-    return {
-        log: { loglevel: "warning", access: logPath },
-        inbounds: [socksInbound, httpInbound],
-        outbounds,
-        routing: {
-            domainStrategy: "IPIfNonMatch",
-            rules: [
-                { type: "field", ip: ["geoip:private"], outboundTag: "direct" },
-                { type: "field", domain: ["geosite:category-ads-all"], outboundTag: "block" },
-            ],
-        },
-    };
+    // No real URI → throw an honest error instead of using fake credentials.
+    throw new Error(`No real VPN config provided. The Distort servers (${server.host}:${server.port}) are not yet operational. ` +
+        `Please select a config from the Community Mesh tab — those use REAL credentials from the Iran subscription.`);
 }
-async function startVpnEngine(server, protocol) {
+async function startVpnEngine(server, protocol, configUri) {
     if (!server)
         throw new Error("No server selected");
     electron_log_1.default.info(`Starting xray-core: ${protocol} to ${server.host}:${server.port}`);
@@ -344,7 +259,8 @@ async function startVpnEngine(server, protocol) {
         catch { }
         vpnProcess = null;
     }
-    const config = buildXrayConfig(server, protocol);
+    // Build the REAL config (uses real credentials from configUri, or throws)
+    const config = buildXrayConfig(server, protocol, configUri);
     const configPath = path.join(electron_1.app.getPath("userData"), "xray-config.json");
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
     electron_log_1.default.info(`xray config written to: ${configPath}`);
@@ -359,29 +275,93 @@ async function startVpnEngine(server, protocol) {
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
     });
+    // Track xray's health — only mark "connected" after handshake success
+    let handshakeConfirmed = false;
+    let startupError = "";
+    const startupTimeout = setTimeout(() => {
+        if (!handshakeConfirmed && !startupError) {
+            // xray started but no explicit success log within 5s.
+            // For protocols like vmess/trojan/ss, xray logs "started" quickly.
+            // We consider it "connected" if xray is still alive after 5s without error.
+            if (vpnProcess && !vpnProcess.killed) {
+                handshakeConfirmed = true;
+                store.set("vpn", {
+                    connected: true,
+                    server,
+                    protocol,
+                    configUri: configUri ?? null,
+                    startedAt: Date.now(),
+                });
+                mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+                electron_log_1.default.info("xray-core confirmed alive — marking as connected");
+            }
+        }
+    }, 5000);
     vpnProcess.stdout?.on("data", (data) => {
-        electron_log_1.default.info(`[xray] ${data.toString().trim()}`);
+        const line = data.toString().trim();
+        electron_log_1.default.info(`[xray] ${line}`);
+        // xray logs "started" when the proxy is ready to accept connections
+        if (line.includes("started") || line.includes("listening") || line.includes("tun:")) {
+            if (!handshakeConfirmed) {
+                handshakeConfirmed = true;
+                clearTimeout(startupTimeout);
+                store.set("vpn", {
+                    connected: true,
+                    server,
+                    protocol,
+                    configUri: configUri ?? null,
+                    startedAt: Date.now(),
+                });
+                mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+                electron_log_1.default.info("xray-core handshake confirmed — connected");
+            }
+        }
     });
     vpnProcess.stderr?.on("data", (data) => {
-        electron_log_1.default.error(`[xray] ${data.toString().trim()}`);
+        const line = data.toString().trim();
+        electron_log_1.default.error(`[xray] ${line}`);
+        // Capture real errors — don't show "connected" if xray failed to start
+        if (line.includes("error") || line.includes("failed") || line.includes("panic")) {
+            startupError = line;
+            clearTimeout(startupTimeout);
+            store.set("vpn", {
+                connected: false,
+                server: null,
+                protocol,
+                configUri: null,
+                startedAt: null,
+            });
+            mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+            mainWindow?.webContents.send("vpn:error", startupError);
+        }
     });
     vpnProcess.on("exit", (code) => {
         electron_log_1.default.info(`xray exited with code ${code}`);
+        clearTimeout(startupTimeout);
         if (store.get("vpn.connected")) {
             store.set("vpn", { ...store.get("vpn"), connected: false, startedAt: null });
             mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+            // If kill switch is enabled, block all traffic now
+            if (store.get("settings.killSwitch")) {
+                electron_log_1.default.warn("Kill switch activated — xray exited unexpectedly");
+                mainWindow?.webContents.send("vpn:kill-switch-activated");
+            }
         }
     });
-    // Wait a moment for xray to start
-    await new Promise((r) => setTimeout(r, 800));
-    store.set("vpn", {
-        connected: true,
-        server,
-        protocol,
-        startedAt: Date.now(),
-    });
-    mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
-    electron_log_1.default.info("xray-core started successfully");
+    // Wait briefly for xray to start (but don't block on handshake)
+    await new Promise((r) => setTimeout(r, 500));
+    if (!handshakeConfirmed && !startupError) {
+        // Still starting — show "connecting" state
+        store.set("vpn", {
+            connected: false,
+            server,
+            protocol,
+            configUri: configUri ?? null,
+            startedAt: null,
+        });
+        mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+        electron_log_1.default.info("xray-core starting — waiting for handshake");
+    }
 }
 async function stopVpnEngine() {
     electron_log_1.default.info("Stopping xray-core…");
@@ -426,8 +406,8 @@ function disconnectVpn() {
 // ---------------------------------------------------------------------------
 // IPC handlers
 // ---------------------------------------------------------------------------
-electron_1.ipcMain.handle("vpn:connect", async (_e, server, protocol) => {
-    await startVpnEngine(server, protocol);
+electron_1.ipcMain.handle("vpn:connect", async (_e, server, protocol, configUri) => {
+    await startVpnEngine(server, protocol, configUri);
     return store.get("vpn");
 });
 electron_1.ipcMain.handle("vpn:disconnect", async () => {

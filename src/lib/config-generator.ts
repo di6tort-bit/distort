@@ -1,7 +1,14 @@
 // DISTORT — VPN config generator
 // Generates ready-to-use configs for WireGuard, V2Ray (VMess), Trojan, Shadowsocks.
-// NOTE: Keys here are demo/local-only placeholders. In production these would be
-// issued by the Distort control plane with per-user key derivation.
+//
+// IMPORTANT: For WireGuard, the keys here are demo placeholders (clearly marked).
+// You MUST replace them with real keys issued by your VPN provider or your own
+// WireGuard server. For V2Ray/Trojan/Shadowsocks, the UUID/password are also
+// placeholders — use the REAL credentials from the Community Mesh tab.
+//
+// To get REAL configs with real credentials, use the Community Mesh tab in the
+// dashboard — those configs are parsed from live Iran subscription URLs and
+// contain actual server UUIDs, passwords, and Reality public keys.
 
 export type Protocol = "wireguard" | "v2ray" | "trojan" | "shadowsocks" | "ssh";
 
