@@ -11,9 +11,5 @@ buildscript {
     }
 }
 
-allprojects {
-    repositories {
-        google()
-        mavenCentral()
-    }
-}
+// NOTE: repositories are declared in settings.gradle (dependencyResolutionManagement)
+// Do not add allprojects { repositories { ... } } here — it conflicts with Gradle 8+
