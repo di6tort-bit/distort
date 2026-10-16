@@ -1,0 +1,7 @@
+{
+  "name":"@distort/desktop","version":"0.1.0","private":true,
+  "description":"DISTORT Windows desktop shell; VPN engine is not implemented yet",
+  "main":"main.cjs","scripts":{"start":"electron .","dist:win":"electron-builder --win nsis"},
+  "devDependencies":{"electron":"^36.0.0","electron-builder":"^26.0.0"},
+  "build":{"appId":"org.distort.desktop","productName":"DISTORT","directories":{"output":"../../release"},"files":["main.cjs","preload.cjs","renderer/**/*","package.json"],"win":{"target":["nsis"]},"nsis":{"oneClick":false,"allowToChangeInstallationDirectory":true}}
+}
