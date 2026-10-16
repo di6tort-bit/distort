@@ -27,6 +27,7 @@ jobs:
         run: bun run build-icons.mjs
       - name: Download xray-core (Windows)
         working-directory: desktop
+        shell: bash
         run: |
           mkdir -p resources/bin
           cd resources/bin
