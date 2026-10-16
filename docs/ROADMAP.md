@@ -16,20 +16,20 @@ At the initial audit, the default branch contained seven paths, including a trac
 - `download/README.md`
 - `docs/ROADMAP.md`
 
-The repository metadata identifies Batchfile as its language, has no declared license, and is very small. The checked-in launcher scripts refer to a Node/Next.js/Electron/Prisma application, but the corresponding `package.json`, lockfile, app source, Prisma schema, Electron main process, tests, and extension files are absent from the visible tree.
+The initial repository was a small Batchfile-only scaffold. The `feat/windows-desktop-chrome-foundation` branch now adds a root npm workspace, Electron desktop UI shell, Chrome Manifest V3 popup scaffold, tests, CI, community guidance, and an MIT license. The previous Next.js/Prisma launcher assumptions have been removed from the Windows scripts.
 
 ### Immediate blockers
 
-1. **No application source or dependency manifest.** The launch/build scripts cannot produce the described app from the current checkout.
+1. **No production VPN engine.** The new desktop shell is runnable in principle but the tunnel integration and Windows service/driver are not implemented.
 2. **No actual VPN tunnel.** No client tunnel integration, protocol configuration, server provisioning, authentication, key lifecycle, DNS routing, kill switch, or leak testing is present in the tree.
-3. **No Chrome extension.** No Manifest V3 manifest, popup/options UI, service worker, proxy integration, permission rationale, or extension packaging exists.
+3. **Chrome extension is a display-only scaffold.** A Manifest V3 manifest and popup exist, but proxy permissions, trusted proxy integration, configuration/authentication, and browser traffic routing do not.
 4. **No deployable backend/control plane.** No API, server inventory, health checks, deployment configuration, abuse controls, or operational runbooks are present.
 5. **No quality/security automation.** No tests, CI workflow, dependency scanning, secret scanning, code signing, release pipeline, or reproducible build instructions are present.
-6. **No product/legal basics.** No explicit license, privacy policy, threat model, support policy, or realistic cost/sustainability plan is present.
+6. **Product/legal basics remain incomplete.** An MIT license, contribution guide, and security reporting guidance were added on the feature branch; a full privacy policy, threat model, support policy, and realistic operating-cost plan remain.
 7. **Environment file cleanup.** The initial `.env` contained a machine-specific database path and was removed from the current tree; a sanitized `.env.example` now documents the local setting, and `.gitignore` excludes local env files. This does not erase the old file from Git history. If real secrets were ever committed, rotate them and consider history cleanup.
 8. **Launcher mismatch.** `start.bat` runs `npm run dev`, opens localhost after a fixed delay, and initializes Prisma only if a local database file is absent. `build-exe.bat` assumes Next.js standalone output, a Prisma schema, and Electron Builder configuration. None of those prerequisites are currently committed. The fixed delay also does not prove that the app is ready.
 9. **Misleading seed message.** The launcher says 30 VPN servers are seeded, but a server list in a database would not itself create functioning or authorized VPN endpoints.
-10. **Stop script risk.** `stop.bat` force-kills any process listening on port 3000, which could terminate an unrelated application.
+10. **Stop script risk resolved on feature branch.** `stop.bat` no longer kills arbitrary processes by port or PID.
 
 This is a repository-level review of the current default-branch tree and all seven visible files, not a claim that absent files were tested locally.
 
@@ -78,15 +78,18 @@ Possible model:
 ### Phase 0 — Repository integrity
 - [x] Add this audit and a root README.
 - [x] Remove tracked `.env` from the current tree; add `.env.example` and ignore local secrets.
-- [ ] Add a license and contribution/security reporting guidance.
+- [x] Add an MIT license and contribution/security reporting guidance (feature branch).
 - [ ] Decide supported platforms and threat model.
 - [ ] Replace claims in install docs that imply a functioning VPN/server pool before they are verified.
 
 ### Phase 1 — Buildable application foundation
-- [ ] Add real package manifests, lockfile, app source, TypeScript/lint/test configuration, and pinned supported runtime versions.
-- [ ] Build a polished responsive UI with connection states driven by actual tunnel status, not a mock toggle.
-- [ ] Add local settings, accessible keyboard navigation, localization (including Persian RTL), error states, and telemetry disabled by default.
-- [ ] Add CI that installs from lockfile, lints, type-checks, tests, and builds from a clean checkout.
+- [x] Add root and desktop package manifests and a desktop app source scaffold (feature branch).
+- [x] Add an initial responsive desktop UI with explicit non-connected state (feature branch).
+- [x] Add a Manifest V3 extension popup scaffold with minimum permissions and explicit limitations (feature branch).
+- [x] Add basic Node tests and a CI workflow (feature branch; CI has not yet run in this environment).
+- [ ] Add and commit a generated package lockfile after a networked npm install.
+- [ ] Add settings, keyboard/accessibility checks, Persian RTL and localization, error states, and telemetry disabled by default.
+- [ ] Verify clean-checkout install and Windows packaging on a Windows runner.
 
 ### Phase 2 — VPN engine and security
 - [ ] Integrate a maintained VPN implementation for each supported OS.
@@ -96,8 +99,9 @@ Possible model:
 - [ ] Obtain independent security review before making strong privacy claims.
 
 ### Phase 3 — Chrome extension
-- [ ] Create Manifest V3 extension with the minimum permissions.
-- [ ] Provide popup UI, explicit connect/disconnect state, proxy configuration, error handling, and privacy disclosures.
+- [x] Create an initial Manifest V3 extension scaffold with minimal permissions (feature branch).
+- [x] Provide a display-only popup with explicit limitations (feature branch).
+- [ ] Implement actual trusted proxy/tunnel integration, connection state, error handling, and privacy disclosures.
 - [ ] Define how the extension obtains trusted configuration and authenticates without shipping shared secrets.
 - [ ] Document browser-only scope, WebRTC/DNS limitations, and interaction with the desktop app.
 - [ ] Test extension packaging and Chrome Web Store policies; never claim system-wide protection.
@@ -122,3 +126,8 @@ A release is not a working VPN until a real encrypted tunnel is established to a
 A release is not a working Chrome VPN until the extension actually routes the declared browser traffic through a tested, trusted proxy path and explains what it does not protect.
 
 A release is not “free forever” until the operator has a credible, transparent plan to pay for bandwidth, servers, maintenance, and abuse handling.
+
+
+## 7. Feature branch update (Windows + Chrome foundation)
+
+The branch `feat/windows-desktop-chrome-foundation` contains the first implementation slice. It is intentionally a UI and packaging foundation only. The Electron UI and Chrome popup explicitly state that no tunnel/proxy is configured. The extension requests only `storage`, not `proxy` or broad host access. The Windows launcher/build scripts now target the Electron workspace rather than missing Next.js/Prisma artifacts. The branch has not yet been run through npm installation or Windows packaging in this environment because external network access was unavailable; CI and local verification remain required before merge.
