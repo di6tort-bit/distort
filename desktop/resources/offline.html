@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DISTORT — Freedom Beyond Borders</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', -apple-system, sans-serif;
+      background: #050814;
+      color: #eaf2ff;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-direction: column;
+      background-image:
+        radial-gradient(ellipse 80% 60% at 50% -10%, rgba(41,98,255,0.22), transparent 60%),
+        radial-gradient(ellipse 50% 50% at 100% 0%, rgba(139,92,246,0.16), transparent 60%),
+        radial-gradient(ellipse 60% 50% at 0% 20%, rgba(0,240,255,0.10), transparent 60%);
+    }
+    .logo {
+      width: 120px; height: 120px;
+      margin-bottom: 32px;
+      filter: drop-shadow(0 0 24px rgba(0,240,255,0.5)) drop-shadow(0 0 60px rgba(41,98,255,0.3));
+    }
+    h1 {
+      font-size: 48px;
+      font-weight: 900;
+      letter-spacing: 4px;
+      margin-bottom: 8px;
+      background: linear-gradient(100deg, #5cf2ff, #00f0ff 25%, #2962ff 60%, #8b5cf6 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .tagline {
+      font-size: 12px;
+      letter-spacing: 6px;
+      color: #8aa0c4;
+      text-transform: uppercase;
+      margin-bottom: 40px;
+    }
+    .status {
+      padding: 16px 24px;
+      background: rgba(13,20,38,0.8);
+      border: 1px solid rgba(0,240,255,0.3);
+      border-radius: 12px;
+      margin-bottom: 24px;
+      max-width: 480px;
+      text-align: center;
+    }
+    .status h2 {
+      color: #5cf2ff;
+      font-size: 16px;
+      margin-bottom: 8px;
+      letter-spacing: 1px;
+    }
+    .status p {
+      color: #8aa0c4;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .btn {
+      display: inline-block;
+      padding: 14px 32px;
+      background: linear-gradient(120deg, #00f0ff, #2962ff 50%, #8b5cf6 100%);
+      color: #02131a;
+      font-weight: 700;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+      font-size: 13px;
+      border: none;
+      border-radius: 10px;
+      cursor: pointer;
+      transition: transform 0.15s;
+    }
+    .btn:hover { transform: scale(1.03); }
+    .footer {
+      position: absolute;
+      bottom: 24px;
+      color: #8aa0c4;
+      font-size: 11px;
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+  <svg class="logo" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+      <linearGradient id="g" x1="10" y1="8" x2="90" y2="92" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#5cf2ff"/>
+        <stop offset="0.45" stop-color="#00f0ff"/>
+        <stop offset="0.75" stop-color="#2962ff"/>
+        <stop offset="1" stop-color="#8b5cf6"/>
+      </linearGradient>
+    </defs>
+    <path d="M30 22 C58 22 76 30 76 50 C76 70 58 78 30 78 L30 64 C46 64 58 60 58 50 C58 40 46 36 30 36 L30 22 Z" fill="url(#g)"/>
+    <path d="M34 26 L52 26 L40 50 L24 50 L34 26 Z" fill="#5cf2ff" opacity="0.55"/>
+  </svg>
+  <h1>DISTORT</h1>
+  <div class="tagline">Freedom Beyond Borders</div>
+  <div class="status">
+    <h2>✓ VPN Engine Ready</h2>
+    <p>xray-core is bundled and ready. The web dashboard is loading from your local server.</p>
+    <p style="margin-top:8px; color:#8aa0c4; font-size:11px;">If you see this, the bundled Next.js server needs to be started. Run DISTORT from the Start Menu to launch everything automatically.</p>
+  </div>
+  <button class="btn" onclick="location.reload()">Retry Connection</button>
+  <div class="footer">v1.0.0 · 100% Free · MIT</div>
+</body>
+</html>

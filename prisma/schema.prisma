@@ -1,0 +1,173 @@
+// DISTORT — Prisma schema
+// Freedom Beyond Borders
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// A VPN server node in the Distort relay mesh.
+model VpnServer {
+  id          String   @id @default(cuid())
+  /// Short id used in configs, e.g. "de-fra-01"
+  code        String   @unique
+  country     String
+  countryCode String
+  city        String
+  flag        String
+  /// Hostname / IP used for control plane
+  host        String
+  port        Int
+  /// Supported protocols: "wireguard","v2ray","trojan","shadowsocks","ssh"
+  protocols   String
+  /// Current load 0..100
+  load        Int      @default(0)
+  /// Latency in ms
+  ping        Int      @default(0)
+  /// Up bandwidth in Mbps (aggregate)
+  upMbps      Int      @default(1000)
+  downMbps    Int      @default(1000)
+  online      Boolean  @default(true)
+  premium     Boolean  @default(false)
+  /// Iran-resilience: does this node also run an obfuscated transport?
+  stealth     Boolean  @default(false)
+  /// Short human note, e.g. "10Gbps backbone, anti-censor ready"
+  note        String?
+  sessions    Session[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+/// A connection session (real or simulated).
+model Session {
+  id          String   @id @default(cuid())
+  serverId    String
+  server      VpnServer @relation(fields: [serverId], references: [id])
+  protocol    String   @default("wireguard")
+  status      String   @default("disconnected")
+  /// Bytes downloaded this session
+  bytesDown   Int      @default(0)
+  /// Bytes uploaded this session
+  bytesUp     Int      @default(0)
+  durationSec Int      @default(0)
+  startedAt   DateTime @default(now())
+  endedAt     DateTime?
+  createdAt   DateTime @default(now())
+}
+
+/// A user-generated or community config bundle.
+model VpnConfig {
+  id        String   @id @default(cuid())
+  label     String
+  protocol  String
+  /// Raw config text (WireGuard conf, v2ray json, trojan ss uri, etc.)
+  content   String
+  source    String   @default("distort")
+  country   String?
+  createdAt DateTime @default(now())
+}
+
+/// Community-sourced anti-censorship config (VLESS/VMess/Trojan/SS),
+/// helpful when the national intranet blocks the primary mesh.
+model CommunityConfig {
+  id        String   @id @default(cuid())
+  protocol  String
+  uri       String
+  country   String?
+  note      String?
+  reach     String  @default("unknown")
+  checkedAt DateTime?
+  createdAt DateTime @default(now())
+}
+
+/// A subscription source (URL) that Distort fetches & parses periodically.
+model Subscription {
+  id          String   @id @default(cuid())
+  label       String
+  url         String
+  /// "community" = the curated Iran list, "custom" = user-added
+  kind        String   @default("custom")
+  enabled     Boolean  @default(true)
+  /// Auto-refresh interval in minutes
+  intervalMin Int      @default(60)
+  /// Last fetch metadata
+  lastFetchedAt DateTime?
+  lastCount   Int      @default(0)
+  lastError   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  configs     ImportedConfig[]
+}
+
+/// A parsed config (vmess/vless/trojan/ss) from a subscription or imported by hand.
+/// These power the "Community Mesh" tab — used when Distort's own nodes are blocked.
+model ImportedConfig {
+  id             String   @id @default(cuid())
+  subscriptionId String?
+  subscription   Subscription? @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  protocol       String
+  /// The original raw URI (vmess://, vless://, trojan://, ss://)
+  uri            String
+  label          String?
+  host           String
+  port           Int
+  network        String   @default("tcp")
+  security       String   @default("none")
+  sni            String?
+  path           String?
+  hostHeader     String?
+  flow           String?
+  country        String?
+  /// 0..100 — higher = more optimized (TLS/Reality/WS/gRPC)
+  score          Int      @default(0)
+  flags          String   @default("")
+  /// TCP reachability: "ok" | "fail" | "unknown"
+  reach          String   @default("unknown")
+  latencyMs      Int      @default(0)
+  /// "optimized" (passes the score threshold) or "all"
+  bucket         String   @default("all")
+  favorite      Boolean  @default(false)
+  checkedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([subscriptionId])
+  @@index([bucket])
+  @@index([favorite])
+  @@index([score])
+}
+
+/// Singleton-ish user settings row (one row, id="default").
+model UserSetting {
+  id                   String  @id @default("default")
+  protocol             String  @default("wireguard")
+  killSwitch           Boolean @default(true)
+  dnsLeakProtection    Boolean @default(true)
+  ipv6LeakProtection   Boolean @default(true)
+  splitTunneling       Boolean @default(false)
+  obfuscation          Boolean @default(true)
+  autoConnect          Boolean @default(false)
+  blockTrackers        Boolean @default(true)
+  blockAds             Boolean @default(false)
+  stealthMode          Boolean @default(true)
+  preferredRegion      String  @default("auto")
+  mtu                  Int     @default(1420)
+  dnsServers           String  @default("1.1.1.1,9.9.9.9")
+  updatedAt            DateTime @updatedAt
+}
+
+/// A registered Distort user (free account).
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  /// Plain "free" for now (100% free product)
+  tier      String   @default("free")
+  referral  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

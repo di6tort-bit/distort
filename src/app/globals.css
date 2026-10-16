@@ -1,0 +1,353 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+  DISTORT — Freedom Beyond Borders
+  Design System: Dark Luxury / Cyberpunk Premium
+  Palette: Deep Void Black + Electric Cyan + Deep Blue + Violet
+*/
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-orbitron);
+  --font-tech: var(--font-rajdhani);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.875rem;
+
+  /* Distort brand palette */
+  --void: #050814;
+  --void-2: #0a0f1f;
+  --surface: #0d1426;
+  --surface-2: #111a31;
+  --cyan: #00f0ff;
+  --cyan-soft: #5cf2ff;
+  --blue: #2962ff;
+  --blue-deep: #0055ff;
+  --violet: #8b5cf6;
+  --violet-deep: #6d28d9;
+  --emerald: #10d9a0;
+  --amber: #ffb020;
+  --rose: #ff4d6d;
+
+  --background: var(--void);
+  --foreground: #eaf2ff;
+  --card: var(--surface);
+  --card-foreground: #eaf2ff;
+  --popover: var(--surface-2);
+  --popover-foreground: #eaf2ff;
+  --primary: var(--cyan);
+  --primary-foreground: #02131a;
+  --secondary: var(--surface-2);
+  --secondary-foreground: #cfe3ff;
+  --muted: #0f1830;
+  --muted-foreground: #8aa0c4;
+  --accent: var(--blue);
+  --accent-foreground: #ffffff;
+  --destructive: #ff4d6d;
+  --border: rgba(120, 180, 255, 0.12);
+  --input: rgba(120, 180, 255, 0.14);
+  --ring: var(--cyan);
+  --chart-1: #00f0ff;
+  --chart-2: #2962ff;
+  --chart-3: #8b5cf6;
+  --chart-4: #10d9a0;
+  --chart-5: #ffb020;
+  --sidebar: rgba(8, 13, 28, 0.72);
+  --sidebar-foreground: #eaf2ff;
+  --sidebar-primary: var(--cyan);
+  --sidebar-primary-foreground: #02131a;
+  --sidebar-accent: rgba(41, 98, 255, 0.16);
+  --sidebar-accent-foreground: #eaf2ff;
+  --sidebar-border: rgba(120, 180, 255, 0.10);
+  --sidebar-ring: var(--cyan);
+}
+
+.dark {
+  /* Distort is dark-first; same as root */
+  --background: var(--void);
+  --foreground: #eaf2ff;
+  --card: var(--surface);
+  --card-foreground: #eaf2ff;
+  --popover: var(--surface-2);
+  --popover-foreground: #eaf2ff;
+  --primary: var(--cyan);
+  --primary-foreground: #02131a;
+  --secondary: var(--surface-2);
+  --secondary-foreground: #cfe3ff;
+  --muted: #0f1830;
+  --muted-foreground: #8aa0c4;
+  --accent: var(--blue);
+  --accent-foreground: #ffffff;
+  --destructive: #ff4d6d;
+  --border: rgba(120, 180, 255, 0.12);
+  --input: rgba(120, 180, 255, 0.14);
+  --ring: var(--cyan);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background text-foreground;
+    background-color: var(--void);
+    background-image:
+      radial-gradient(ellipse 80% 60% at 50% -10%, rgba(41, 98, 255, 0.22), transparent 60%),
+      radial-gradient(ellipse 50% 50% at 100% 0%, rgba(139, 92, 246, 0.16), transparent 60%),
+      radial-gradient(ellipse 60% 50% at 0% 20%, rgba(0, 240, 255, 0.10), transparent 60%);
+    background-attachment: fixed;
+    font-feature-settings: "ss01", "cv01";
+  }
+  ::selection {
+    background: rgba(0, 240, 255, 0.28);
+    color: #ffffff;
+  }
+}
+
+/* ---------- Distort utility classes ---------- */
+
+.font-display { font-family: var(--font-orbitron), var(--font-geist-sans), sans-serif; }
+.font-tech { font-family: var(--font-rajdhani), var(--font-geist-sans), sans-serif; }
+
+/* Glassmorphism panel */
+.glass {
+  background: linear-gradient(180deg, rgba(17, 26, 49, 0.72), rgba(13, 20, 38, 0.55));
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid rgba(120, 180, 255, 0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 20px 60px -20px rgba(0, 0, 0, 0.7);
+}
+
+.glass-strong {
+  background: linear-gradient(180deg, rgba(17, 26, 49, 0.9), rgba(10, 15, 31, 0.85));
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  border: 1px solid rgba(120, 180, 255, 0.16);
+}
+
+/* Brand gradient text */
+.text-gradient-brand {
+  background: linear-gradient(100deg, #5cf2ff 0%, #00f0ff 25%, #2962ff 60%, #8b5cf6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.text-gradient-cyan {
+  background: linear-gradient(100deg, #5cf2ff, #00f0ff);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Glowing border ring */
+.ring-glow {
+  box-shadow:
+    0 0 0 1px rgba(0, 240, 255, 0.4),
+    0 0 24px rgba(0, 240, 255, 0.25),
+    0 0 60px rgba(41, 98, 255, 0.18);
+}
+
+.ring-glow-violet {
+  box-shadow:
+    0 0 0 1px rgba(139, 92, 246, 0.4),
+    0 0 24px rgba(139, 92, 246, 0.25);
+}
+
+/* Brand gradient surface */
+.bg-brand-gradient {
+  background: linear-gradient(120deg, #00f0ff 0%, #2962ff 50%, #8b5cf6 100%);
+}
+.bg-brand-gradient-soft {
+  background: linear-gradient(120deg, rgba(0,240,255,0.16), rgba(41,98,255,0.16) 50%, rgba(139,92,246,0.16));
+}
+
+/* Animated mesh background */
+.mesh-bg {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+.mesh-bg::before,
+.mesh-bg::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.55;
+  animation: meshFloat 16s ease-in-out infinite;
+}
+.mesh-bg::before {
+  width: 520px; height: 520px;
+  background: radial-gradient(circle, rgba(0,240,255,0.55), transparent 65%);
+  top: -160px; left: -120px;
+}
+.mesh-bg::after {
+  width: 600px; height: 600px;
+  background: radial-gradient(circle, rgba(41,98,255,0.5), transparent 65%);
+  bottom: -200px; right: -160px;
+  animation-delay: -8s;
+}
+@keyframes meshFloat {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(40px, -30px) scale(1.08); }
+}
+
+/* Conic spinner (connect animation) */
+.conic-spinner {
+  background: conic-gradient(from 0deg, transparent 0%, rgba(0,240,255,0) 40%, #00f0ff 70%, #5cf2ff 90%, transparent 100%);
+  animation: spin 1.4s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Pulse rings (connected state) */
+.pulse-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 1px solid rgba(0, 240, 255, 0.5);
+  animation: pulseRing 2.4s ease-out infinite;
+}
+.pulse-ring:nth-child(2) { animation-delay: 0.8s; }
+.pulse-ring:nth-child(3) { animation-delay: 1.6s; }
+@keyframes pulseRing {
+  0% { transform: scale(0.85); opacity: 0.9; }
+  100% { transform: scale(1.6); opacity: 0; }
+}
+
+/* Grid overlay (topographic vibe) */
+.grid-overlay {
+  background-image:
+    linear-gradient(rgba(120,180,255,0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(120,180,255,0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black, transparent 80%);
+}
+
+/* Status dot glow */
+.dot-live {
+  position: relative;
+}
+.dot-live::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 9999px;
+  background: currentColor;
+  opacity: 0.4;
+  filter: blur(6px);
+  z-index: -1;
+  animation: livePulse 2s ease-in-out infinite;
+}
+@keyframes livePulse {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.7; transform: scale(1.15); }
+}
+
+/* Custom scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 240, 255, 0.35) transparent;
+}
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, rgba(0,240,255,0.45), rgba(41,98,255,0.45));
+  border-radius: 9999px;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(0,240,255,0.7); }
+
+/* Marquee */
+.marquee {
+  display: flex;
+  gap: 3rem;
+  animation: marquee 28s linear infinite;
+  white-space: nowrap;
+}
+@keyframes marquee {
+  from { transform: translateX(0); }
+  to { transform: translateX(-50%); }
+}
+
+/* Scanline subtle effect */
+.scanline {
+  position: relative;
+  overflow: hidden;
+}
+.scanline::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent 0px,
+    transparent 2px,
+    rgba(0, 240, 255, 0.025) 3px,
+    transparent 4px
+  );
+  pointer-events: none;
+}
+
+/* Logo glow */
+.logo-glow {
+  filter: drop-shadow(0 0 24px rgba(0, 240, 255, 0.35)) drop-shadow(0 0 60px rgba(41, 98, 255, 0.25));
+}
+
+/* Reduce motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,35 @@
+<svg width="128" height="128" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="distortGrad" x1="10" y1="8" x2="90" y2="92" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5cf2ff"/>
+      <stop offset="0.45" stop-color="#00f0ff"/>
+      <stop offset="0.75" stop-color="#2962ff"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="distortGrad2" x1="20" y1="20" x2="80" y2="80" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0055ff"/>
+      <stop offset="1" stop-color="#6d28d9"/>
+    </linearGradient>
+    <filter id="distortGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.2" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <rect width="100" height="100" rx="24" fill="#050814"/>
+  <!-- Twisted ribbon D mark -->
+  <g filter="url(#distortGlow)">
+    <!-- Back ribbon (deep) -->
+    <path d="M30 22 C58 22 76 30 76 50 C76 70 58 78 30 78 L30 64 C46 64 58 60 58 50 C58 40 46 36 30 36 L30 22 Z" fill="url(#distortGrad2)" opacity="0.85"/>
+    <!-- Front ribbon (bright) -->
+    <path d="M30 22 C58 22 76 30 76 50 C76 70 58 78 30 78 L30 64 C46 64 58 60 58 50 C58 40 46 36 30 36 L30 22 Z" fill="url(#distortGrad)"/>
+    <!-- Speed streak / highlight -->
+    <path d="M34 26 L52 26 L40 50 L24 50 L34 26 Z" fill="#5cf2ff" opacity="0.55"/>
+    <!-- Inner cut -->
+    <path d="M48 70 L72 70 L60 50 L44 50 L48 70 Z" fill="#050814" opacity="0.55"/>
+    <!-- Specular highlight -->
+    <path d="M33 24 C50 24 64 28 70 40" stroke="#ffffff" stroke-width="1.4" opacity="0.7" stroke-linecap="round"/>
+  </g>
+</svg>

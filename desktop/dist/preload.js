@@ -1,0 +1,45 @@
+"use strict";
+// DISTORT Desktop — preload script
+// Exposes a safe, minimal API to the renderer (sandboxed).
+Object.defineProperty(exports, "__esModule", { value: true });
+const electron_1 = require("electron");
+electron_1.contextBridge.exposeInMainWorld("distort", {
+    // VPN
+    vpn: {
+        connect: (server, protocol) => electron_1.ipcRenderer.invoke("vpn:connect", server, protocol),
+        disconnect: () => electron_1.ipcRenderer.invoke("vpn:disconnect"),
+        getState: () => electron_1.ipcRenderer.invoke("vpn:state"),
+        onStateChange: (cb) => {
+            const handler = (_e, state) => cb(state);
+            electron_1.ipcRenderer.on("vpn:state-changed", handler);
+            return () => electron_1.ipcRenderer.removeListener("vpn:state-changed", handler);
+        },
+    },
+    // Settings
+    settings: {
+        get: () => electron_1.ipcRenderer.invoke("settings:get"),
+        set: (patch) => electron_1.ipcRenderer.invoke("settings:set", patch),
+    },
+    // App info
+    app: {
+        version: () => electron_1.ipcRenderer.invoke("app:version"),
+        platform: () => electron_1.ipcRenderer.invoke("app:platform"),
+    },
+    // Navigation (from tray)
+    onNavigate: (cb) => {
+        const handler = (_e, view) => cb(view);
+        electron_1.ipcRenderer.on("navigate", handler);
+        return () => electron_1.ipcRenderer.removeListener("navigate", handler);
+    },
+    // Capabilities — what the desktop shell can actually do
+    capabilities: {
+        desktopShell: true,
+        vpnEngine: true, // ✅ xray-core is bundled and integrated
+        autoUpdate: true,
+        systemTray: true,
+        minimizeToTray: true,
+        communityServersConfigured: true,
+        socksProxy: { host: "127.0.0.1", port: 10808 },
+        httpProxy: { host: "127.0.0.1", port: 10809 },
+    },
+});

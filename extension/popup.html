@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DISTORT — Freedom Beyond Borders</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Decorative mesh background -->
+    <div class="mesh" aria-hidden="true"></div>
+    <div class="grid-overlay" aria-hidden="true"></div>
+
+    <!-- Header -->
+    <header class="header">
+      <div class="brand">
+        <svg class="logo" width="28" height="28" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <defs>
+            <linearGradient id="g1" x1="10" y1="8" x2="90" y2="92" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#5cf2ff"/>
+              <stop offset="0.45" stop-color="#00f0ff"/>
+              <stop offset="0.75" stop-color="#2962ff"/>
+              <stop offset="1" stop-color="#8b5cf6"/>
+            </linearGradient>
+            <linearGradient id="g2" x1="20" y1="20" x2="80" y2="80" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#0055ff"/>
+              <stop offset="1" stop-color="#6d28d9"/>
+            </linearGradient>
+          </defs>
+          <rect width="100" height="100" rx="24" fill="#050814"/>
+          <path d="M30 22 C58 22 76 30 76 50 C76 70 58 78 30 78 L30 64 C46 64 58 60 58 50 C58 40 46 36 30 36 L30 22 Z" fill="url(#g2)" opacity="0.85"/>
+          <path d="M30 22 C58 22 76 30 76 50 C76 70 58 78 30 78 L30 64 C46 64 58 60 58 50 C58 40 46 36 30 36 L30 22 Z" fill="url(#g1)"/>
+          <path d="M34 26 L52 26 L40 50 L24 50 L34 26 Z" fill="#5cf2ff" opacity="0.55"/>
+          <path d="M48 70 L72 70 L60 50 L44 50 L48 70 Z" fill="#050814" opacity="0.55"/>
+          <path d="M33 24 C50 24 64 28 70 40" stroke="#ffffff" stroke-width="1.4" opacity="0.7" stroke-linecap="round"/>
+        </svg>
+        <div class="wordmark">
+          <span class="wordmark-name">DISTORT</span>
+          <span class="wordmark-tag">Freedom Beyond Borders</span>
+        </div>
+      </div>
+      <span class="version-pill" id="versionPill">v1.0.0</span>
+    </header>
+
+    <!-- Iran-resilience status line -->
+    <div class="resilience" id="resilience">
+      <span class="resilience-dot" id="resilienceDot"></span>
+      <span class="resilience-text" id="resilienceText">Checking network climate…</span>
+    </div>
+
+    <!-- Connect button -->
+    <section class="connect-wrap">
+      <button class="connect-btn" id="connectBtn" aria-label="Connect" data-state="disconnected">
+        <span class="pulse-ring" aria-hidden="true"></span>
+        <span class="pulse-ring delay" aria-hidden="true"></span>
+        <span class="spinner" aria-hidden="true"></span>
+        <svg class="power-icon" width="34" height="34" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M12 3v9" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+          <path d="M6.4 6.4a8 8 0 1 0 11.2 0" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+        </svg>
+      </button>
+      <div class="connect-state" id="connectState">Tap to connect</div>
+    </section>
+
+    <!-- Current server card -->
+    <section class="card server-card" id="serverCard">
+      <div class="server-flag" id="serverFlag">🇩🇪</div>
+      <div class="server-meta">
+        <div class="server-line-1">
+          <span class="server-country" id="serverCountry">Germany</span>
+          <span class="server-city" id="serverCity">Frankfurt</span>
+        </div>
+        <div class="server-line-2">
+          <span class="ping" id="serverPing">— ms</span>
+          <span class="dot-sep">•</span>
+          <span class="protocol-badge" id="serverProtocol">WireGuard</span>
+          <span class="dot-sep">•</span>
+          <span class="stealth-indicator" id="serverStealth">Stealth</span>
+        </div>
+      </div>
+      <button class="ghost-btn" id="changeServerBtn" title="Change server">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M3 7h13l-3-3M21 17H8l3 3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </section>
+
+    <!-- Server list (collapsible) -->
+    <section class="card server-list-wrap hidden" id="serverListWrap">
+      <div class="search-row">
+        <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
+          <path d="m20 20-3-3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <input type="search" id="serverSearch" placeholder="Search country or city…" autocomplete="off" />
+      </div>
+      <div class="server-list" id="serverList" role="listbox" aria-label="Server list"></div>
+    </section>
+
+    <!-- Live stats (visible while connected) -->
+    <section class="card stats hidden" id="statsCard">
+      <div class="stat">
+        <div class="stat-label">↓ Download</div>
+        <div class="stat-value" id="statDown">0.0 Mb/s</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">↑ Upload</div>
+        <div class="stat-value" id="statUp">0.0 Mb/s</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Session</div>
+        <div class="stat-value" id="statSession">00:00:00</div>
+      </div>
+      <div class="stat">
+        <div class="stat-label">Data</div>
+        <div class="stat-value" id="statData">0.0 MB</div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="proto-select" id="protoSelect">
+        <button class="proto-pill active" data-proto="wireguard">WireGuard</button>
+        <button class="proto-pill" data-proto="v2ray">V2Ray</button>
+        <button class="proto-pill" data-proto="trojan">Trojan</button>
+        <button class="proto-pill" data-proto="shadowsocks">SS</button>
+      </div>
+      <div class="footer-actions">
+        <label class="stealth-toggle" title="Stealth transport (obfuscation)">
+          <input type="checkbox" id="stealthToggle" />
+          <span class="stealth-switch"></span>
+          <span class="stealth-label">Stealth</span>
+        </label>
+        <button class="icon-btn" id="optionsBtn" title="Settings" aria-label="Open settings">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="2"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+    </footer>
+
+    <!-- Sync button -->
+    <button class="sync-btn" id="syncBtn" title="Sync server list from Distort">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>Sync servers</span>
+    </button>
+  </div>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>
