@@ -1,0 +1,75 @@
+═══════════════════════════════════════════════
+   DISTORT  —  Freedom Beyond Borders
+   Quick Install Guide (Windows)
+═══════════════════════════════════════════════
+
+
+?? EASIEST WAY (Web App)
+─────────────────────────
+
+1. Double-click  start.bat
+2. Your browser opens automatically at http://localhost:3000
+
+That's it! First run takes 3-5 minutes (installs dependencies
+and seeds 30 VPN servers). Subsequent runs start in seconds.
+
+
+?? DESKTOP APP (.exe — no browser)
+──────────────────────────────────
+
+1. Double-click  build-exe.bat
+   (takes 10-20 minutes on first run)
+
+2. When done, you'll find:
+   release\DISTORT-Portable-1.0.0.exe
+
+3. Double-click that .exe to run DISTORT as a
+   native desktop window (no browser needed).
+
+
+?? PREREQUISITES
+────────────────
+
+• Node.js 18+  →  https://nodejs.org/  (install LTS version)
+   During install, make sure "Add to PATH" is checked.
+
+
+?? FILES IN THIS FOLDER
+───────────────────────
+
+  start.bat        →  Run web app (opens browser)
+  build-exe.bat    →  Build Windows .exe (desktop app)
+  stop.bat         →  Stop the running server
+
+
+?? TROUBLESHOOTING
+──────────────────
+
+"Node.js is NOT installed"
+  → Install Node.js LTS from https://nodejs.org/
+
+"npm install failed"
+  → Check your internet connection
+  → Run:  npm cache clean --force
+  → Then run start.bat again
+
+"Port 3000 already in use"
+  → Run stop.bat first, then start.bat again
+
+Browser doesn't open automatically
+  → Manually go to http://localhost:3000
+
+
+?? TO STOP THE SERVER
+─────────────────────
+
+• Close the DISTORT command window, OR
+• Double-click stop.bat
+
+
+═══════════════════════════════════════════════
+  Built with Next.js 16 + TypeScript + Tailwind
+  CSS 4 + Prisma + Electron.
+  
+  DISTORT — Freedom Beyond Borders
+═══════════════════════════════════════════════
