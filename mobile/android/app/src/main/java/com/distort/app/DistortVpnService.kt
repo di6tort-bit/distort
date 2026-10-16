@@ -105,7 +105,7 @@ class DistortVpnService : VpnService() {
                     showNotification("Connected · ${host}")
                     Log.i(TAG, "VPN connected successfully")
                 } else {
-                    val exitCode = xrayProcess?.exitValue ?: -1
+                    val exitCode = try { xrayProcess?.exitValue() ?: -1 } catch (e: Exception) { -1 }
                     Log.e(TAG, "xray failed to start, exit=$exitCode")
                     showNotification("Connection failed")
                     stopVpn()
@@ -164,7 +164,7 @@ class DistortVpnService : VpnService() {
                 }
             }.start()
 
-            Log.i(TAG, "xray-core started, pid=${xrayProcess?.pid()}")
+            Log.i(TAG, "xray-core started")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start xray", e)
             showNotification("VPN engine error")
@@ -184,7 +184,7 @@ class DistortVpnService : VpnService() {
                         if (isRunning.get()) {
                             showNotification("VPN disconnected — restarting")
                             // Auto-restart xray if it crashes
-                            val exitCode = xrayProcess?.exitValue ?: -1
+                            val exitCode = try { xrayProcess?.exitValue() ?: -1 } catch (e: Exception) { -1 }
                             Log.w(TAG, "xray exit code: $exitCode")
                         }
                         break
