@@ -15,18 +15,17 @@ jobs:
         run: bun install
       - name: Generate Prisma client
         run: bunx prisma generate
-      - name: Build Next.js
+      - name: Build Next.js (standalone + copy static)
         run: bun run build
         env:
           DATABASE_URL: "file:/tmp/distort.db"
-          SKIP_DB: "true"
       - name: Install desktop deps
         working-directory: desktop
         run: bun install
       - name: Generate icons
         working-directory: desktop
         run: bun run build-icons.mjs
-      - name: Download xray-core
+      - name: Download xray-core (Windows)
         working-directory: desktop
         run: |
           mkdir -p resources/bin
@@ -34,7 +33,9 @@ jobs:
           curl -sL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip
           unzip -o xray.zip
           rm xray.zip
-      - name: Build desktop app
+          # Verify wintun.dll is present (needed for TUN inbound)
+          ls -la wintun.dll xray.exe
+      - name: Build desktop app (NSIS installer + portable)
         working-directory: desktop
         run: |
           bun run build:desktop
