@@ -1,7 +1,7 @@
 {
   "name": "distort-desktop",
   "version": "1.0.0",
-  "description": "DISTORT — Freedom Beyond Borders. A 100% free, anti-censorship VPN stronger than Nekoray & Hiddify.",
+  "description": "DISTORT \u2014 Freedom Beyond Borders. A 100% free, anti-censorship VPN stronger than Nekoray & Hiddify.",
   "main": "dist/main.js",
   "author": "DISTORT Project",
   "license": "MIT",
@@ -18,7 +18,7 @@
   "build": {
     "appId": "com.distort.desktop",
     "productName": "DISTORT",
-    "copyright": "Copyright © 2026 DISTORT Project",
+    "copyright": "Copyright \u00a9 2026 DISTORT Project",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -32,18 +32,46 @@
       {
         "from": "resources/bin",
         "to": "bin",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../.next/standalone",
+        "to": "next-standalone",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../.next/static",
+        "to": "next-standalone/.next/static",
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "../public",
-        "to": "public",
-        "filter": ["**/*"]
+        "to": "next-standalone/public",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.ico",
       "artifactName": "DISTORT-Setup-${version}.${ext}",
@@ -68,12 +96,17 @@
       "artifactName": "DISTORT-Portable-${version}.exe"
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "icon": "build/icon.icns",
       "category": "public.app-category.utilities"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "icon": "build/icon.png",
       "category": "Network"
     }

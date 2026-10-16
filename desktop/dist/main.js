@@ -454,7 +454,75 @@ electron_1.ipcMain.handle("app:platform", async () => {
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
-electron_1.app.whenReady().then(() => {
+const child_process_2 = require("child_process");
+let nextServer = null;
+function getNextStandalonePath() {
+    const isDev = !!process.env.DISTORT_DEV;
+    if (isDev) {
+        return path.join(__dirname, "..", "..", ".next", "standalone");
+    }
+    // Production: bundled in resources/next-standalone
+    return path.join(process.resourcesPath, "next-standalone");
+}
+function startNextServer() {
+    return new Promise((resolve, reject) => {
+        const standalonePath = getNextStandalonePath();
+        const serverJs = path.join(standalonePath, "server.js");
+        electron_log_1.default.info(`Starting Next.js standalone server from: ${serverJs}`);
+        if (!fs.existsSync(serverJs)) {
+            electron_log_1.default.warn(`Next.js standalone server.js not found at ${serverJs}`);
+            electron_log_1.default.info("Will use offline page as fallback");
+            resolve();
+            return;
+        }
+        // Copy static assets to the right place if needed
+        const staticSrc = path.join(standalonePath, ".next", "static");
+        const staticDest = path.join(standalonePath, ".next", "static");
+        if (fs.existsSync(staticSrc) && !fs.existsSync(staticDest)) {
+            // already in place
+        }
+        // Start the Next.js standalone server on port 38571
+        nextServer = (0, child_process_2.spawn)(process.execPath, [serverJs], {
+            cwd: standalonePath,
+            env: {
+                ...process.env,
+                PORT: "38571",
+                NODE_ENV: "production",
+                HOSTNAME: "127.0.0.1",
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+        });
+        nextServer.stdout?.on("data", (data) => {
+            electron_log_1.default.info(`[next] ${data.toString().trim()}`);
+        });
+        nextServer.stderr?.on("data", (data) => {
+            electron_log_1.default.error(`[next] ${data.toString().trim()}`);
+        });
+        // Wait for server to be ready
+        let attempts = 0;
+        const checkInterval = setInterval(() => {
+            attempts++;
+            fetch("http://127.0.0.1:38571/")
+                .then((r) => {
+                if (r.ok) {
+                    clearInterval(checkInterval);
+                    electron_log_1.default.info("Next.js standalone server is ready on port 38571");
+                    resolve();
+                }
+            })
+                .catch(() => {
+                if (attempts > 20) {
+                    clearInterval(checkInterval);
+                    electron_log_1.default.warn("Next.js server didn't start in time");
+                    resolve(); // resolve anyway, will use offline fallback
+                }
+            });
+        }, 500);
+    });
+}
+electron_1.app.whenReady().then(async () => {
+    // Start Next.js standalone server first (if available)
+    await startNextServer();
     createWindow();
     createTray();
     // Auto-connect on startup if enabled
