@@ -1,0 +1,25 @@
+# Copy this file to .github/workflows/build-android.yml
+name: Build DISTORT Android APK
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with: { bun-version: latest }
+      - uses: actions/setup-java@v4
+        with: { distribution: 'temurin', java-version: '21' }
+      - uses: android-actions/setup-android@v3
+        with: { packages: 'platform-tools platforms;android-34 build-tools;34.0.0' }
+      - name: Build APK
+        working-directory: mobile/android
+        run: ./gradlew assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DISTORT-Android-APK
+          path: mobile/android/app/build/outputs/apk/debug/*.apk
