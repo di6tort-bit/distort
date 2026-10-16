@@ -21,31 +21,26 @@ jobs:
         run: yes | sdkmanager --licenses || true
       - name: Download xray-core for all Android ABIs
         working-directory: mobile/android/app/src/main/jniLibs
+        shell: bash
         run: |
-          # arm64-v8a (most modern phones)
+          # arm64-v8a (most modern phones — ~95% of devices)
           mkdir -p arm64-v8a
-          curl -sL -o xray-arm64.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm64-v8a.zip
-          unzip -o xray-arm64.zip -d arm64-tmp
-          cp arm64-tmp/xray arm64-v8a/libxray.so
+          curl -fsSL -o /tmp/xray-arm64.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm64-v8a.zip
+          unzip -o /tmp/xray-arm64.zip -d /tmp/arm64-tmp
+          cp /tmp/arm64-tmp/xray arm64-v8a/libxray.so
           chmod +x arm64-v8a/libxray.so
-          rm -rf arm64-tmp xray-arm64.zip
-
-          # armeabi-v7a (older 32-bit phones)
-          mkdir -p armeabi-v7a
-          curl -sL -o xray-arm.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-armeabi-v7a.zip
-          unzip -o xray-arm.zip -d arm-tmp
-          cp arm-tmp/xray armeabi-v7a/libxray.so
-          chmod +x armeabi-v7a/libxray.so
-          rm -rf arm-tmp xray-arm.zip
+          rm -rf /tmp/arm64-tmp /tmp/xray-arm64.zip
 
           # x86_64 (emulators)
           mkdir -p x86_64
-          curl -sL -o xray-x86.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-x86_64.zip
-          unzip -o xray-x86.zip -d x86-tmp
-          cp x86-tmp/xray x86_64/libxray.so
+          curl -fsSL -o /tmp/xray-x86.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-x86_64.zip
+          unzip -o /tmp/xray-x86.zip -d /tmp/x86-tmp
+          cp /tmp/x86-tmp/xray x86_64/libxray.so
           chmod +x x86_64/libxray.so
-          rm -rf x86-tmp xray-x86.zip
+          rm -rf /tmp/x86-tmp /tmp/xray-x86.zip
 
+          # Note: armeabi-v7a is not provided by XTLS releases — arm64 covers ~95% of devices.
+          echo "Bundled ABIs:"
           ls -lh */libxray.so
       - name: Install Gradle
         run: |
