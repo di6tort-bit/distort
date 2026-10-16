@@ -2,36 +2,41 @@
 
 **Freedom Beyond Borders** — an open-source privacy and connectivity project.
 
-> Project status: **early scaffold / not a working VPN yet**. The current repository contains Windows launcher scripts and setup notes, but not the application source, VPN tunnel implementation, server infrastructure, or a Chrome extension.
+> **Status: early preview, not a working VPN.** This branch adds a desktop UI shell and a Chrome extension popup. Neither currently tunnels traffic, changes your public IP, or provides security protection.
 
-## Goals
+## Version 0.1 foundation
 
-- Modern desktop VPN client with a clear connection state and privacy-first defaults.
-- Chrome extension for browser proxying, with explicit permissions and clear limitations.
-- Open, auditable networking components and reproducible builds.
-- Resilience under network disruption, without promising that any tool can always bypass a nationwide shutdown.
-- Free for users where possible, with transparent infrastructure costs and no hidden data monetization.
+- Windows desktop shell built with Electron, with context isolation, sandboxing, and Node integration disabled in the renderer.
+- Chrome Manifest V3 extension with a minimal permission set and an explicit preview status.
+- npm workspace, basic extension tests, CI workflow, contribution/security guidance, and Windows packaging script.
+- MIT-licensed community development foundation.
 
-## Repository status
+## Run the Windows desktop preview
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for the architecture, gap analysis, security checklist, and phased plan.
+Requirements: Node.js 20.11 or newer and npm.
 
-## Current Windows launcher
+```sh
+npm install
+npm start
+```
 
-The existing `start.bat` expects a Node.js project and runs `npm run dev`; `build-exe.bat` expects a Next.js/Electron/Prisma project. The source files and package manifests needed to make those commands work are not currently present in this repository.
+Or run `start.bat` on Windows.
 
-## Security note
+## Load the Chrome extension preview
 
-Do not commit real credentials, private keys, access tokens, server credentials, or personal data. Keep local environment files out of Git and commit only a sanitized `.env.example`. If a secret was ever committed, revoke/rotate it; deleting it in a later commit does not erase it from Git history.
+1. Open `chrome://extensions`.
+2. Enable Developer mode.
+3. Select **Load unpacked**.
+4. Choose the repository's `apps/extension` folder.
 
-## Development principles
+The extension does not request proxy permissions and does not redirect browser traffic.
 
-- Never claim the VPN is connected unless the tunnel has actually been established and verified.
-- Fail closed when configured to prevent leaks; make the behavior visible to the user.
-- Do not collect browsing history or DNS logs by default.
-- Publish threat model, privacy policy, supported platforms, and known limitations before public release.
-- Use independently reviewed, maintained VPN protocols rather than inventing cryptography.
+## Build a Windows installer
 
-## License
+On a Windows machine, run `npm install`, then `npm run dist:win` or double-click `build-exe.bat`. Output is intended for `release/`. Windows packaging has not yet been verified on a Windows runner.
 
-No license is currently specified. Until a license is added, others do not automatically have permission to reuse, modify, or redistribute this code. Choose a license deliberately before inviting contributions.
+## Not implemented yet
+
+No VPN tunnel, WireGuard integration, Windows tunnel driver/service, DNS or IPv6 leak protection, kill switch, proxy backend, trusted server list, community relay fleet, control plane, or donation infrastructure is implemented. The connect controls are intentionally disabled so the UI cannot misrepresent a connection.
+
+See [docs/V1-IMPLEMENTATION.md](docs/V1-IMPLEMENTATION.md) and [docs/ROADMAP.md](docs/ROADMAP.md) for architecture and next steps. Do not rely on this preview for privacy or security.
