@@ -3,6 +3,7 @@ package com.distort.app
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Color
+import android.net.VpnService
 import android.os.Bundle
 import android.view.Gravity
 import android.view.View
