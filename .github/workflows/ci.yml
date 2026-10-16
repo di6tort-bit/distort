@@ -12,6 +12,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Install workspace dependencies
+        run: npm install --ignore-scripts
       - name: Validate extension manifest and preview claims
         run: npm run test:extension
       - name: Run project tests
