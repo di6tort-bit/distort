@@ -4,15 +4,17 @@ Updated: 2026-10-16
 
 ## 1. Current repository audit
 
-The default branch currently has only seven tracked paths:
+At the initial audit, the default branch contained seven paths, including a tracked `.env`. The follow-up documentation/security commits added `README.md`, this roadmap, and `.env.example`, and removed `.env`. The current tree contains these paths:
 
-- `.env`
+- `.env.example`
 - `.gitignore`
 - `INSTALL.txt`
+- `README.md`
 - `build-exe.bat`
 - `start.bat`
 - `stop.bat`
 - `download/README.md`
+- `docs/ROADMAP.md`
 
 The repository metadata identifies Batchfile as its language, has no declared license, and is very small. The checked-in launcher scripts refer to a Node/Next.js/Electron/Prisma application, but the corresponding `package.json`, lockfile, app source, Prisma schema, Electron main process, tests, and extension files are absent from the visible tree.
 
@@ -24,7 +26,7 @@ The repository metadata identifies Batchfile as its language, has no declared li
 4. **No deployable backend/control plane.** No API, server inventory, health checks, deployment configuration, abuse controls, or operational runbooks are present.
 5. **No quality/security automation.** No tests, CI workflow, dependency scanning, secret scanning, code signing, release pipeline, or reproducible build instructions are present.
 6. **No product/legal basics.** No explicit license, privacy policy, threat model, support policy, or realistic cost/sustainability plan is present.
-7. **Environment file is tracked.** The current `.env` contains a machine-specific database path. It is not a portable configuration and should not be tracked. Replace it with a sanitized `.env.example`; keep local `.env` ignored. If real secrets have ever been added, rotate them and consider history cleanup.
+7. **Environment file cleanup.** The initial `.env` contained a machine-specific database path and was removed from the current tree; a sanitized `.env.example` now documents the local setting, and `.gitignore` excludes local env files. This does not erase the old file from Git history. If real secrets were ever committed, rotate them and consider history cleanup.
 8. **Launcher mismatch.** `start.bat` runs `npm run dev`, opens localhost after a fixed delay, and initializes Prisma only if a local database file is absent. `build-exe.bat` assumes Next.js standalone output, a Prisma schema, and Electron Builder configuration. None of those prerequisites are currently committed. The fixed delay also does not prove that the app is ready.
 9. **Misleading seed message.** The launcher says 30 VPN servers are seeded, but a server list in a database would not itself create functioning or authorized VPN endpoints.
 10. **Stop script risk.** `stop.bat` force-kills any process listening on port 3000, which could terminate an unrelated application.
@@ -74,8 +76,8 @@ Possible model:
 ## 5. Phased delivery plan
 
 ### Phase 0 — Repository integrity
-- [ ] Add this audit and a root README.
-- [ ] Remove tracked `.env`; add `.env.example` and ignore local secrets.
+- [x] Add this audit and a root README.
+- [x] Remove tracked `.env` from the current tree; add `.env.example` and ignore local secrets.
 - [ ] Add a license and contribution/security reporting guidance.
 - [ ] Decide supported platforms and threat model.
 - [ ] Replace claims in install docs that imply a functioning VPN/server pool before they are verified.
