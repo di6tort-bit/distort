@@ -1,0 +1,7 @@
+{
+  "name":"distort","version":"0.1.0","private":true,
+  "description":"Open-source privacy and connectivity project — early development scaffold",
+  "workspaces":["apps/desktop"],
+  "scripts":{"start":"npm run start --workspace @distort/desktop","test":"node --test","test:extension":"node --test tests/extension.test.cjs","dist:win":"npm run dist:win --workspace @distort/desktop"},
+  "engines":{"node":">=20.11.0"}
+}
