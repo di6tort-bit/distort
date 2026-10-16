@@ -374,14 +374,30 @@ class DistortVpnService : VpnService() {
                     sid = params["sid"] ?: ""
                 )
             } else if (uri.startsWith("trojan://")) {
-                val u = java.net.URL(uri)
-                val password = u.userInfo ?: ""
+                // trojan://password@host:port?sni=xxx#label
+                // Parse manually since java.net.URL doesn't preserve userInfo well
+                val noScheme = uri.removePrefix("trojan://")
+                val hashIdx = noScheme.indexOf("#")
+                val beforeHash = if (hashIdx >= 0) noScheme.substring(0, hashIdx) else noScheme
+                val qIdx = beforeHash.indexOf("?")
+                val beforeQuery = if (qIdx >= 0) beforeHash.substring(0, qIdx) else beforeHash
+                val queryStr = if (qIdx >= 0) beforeHash.substring(qIdx + 1) else ""
+                val at = beforeQuery.lastIndexOf("@")
+                val password = if (at >= 0) java.net.URLDecoder.decode(beforeQuery.substring(0, at), "UTF-8") else ""
+                val hostPort = if (at >= 0) beforeQuery.substring(at + 1) else beforeQuery
+                val lastColon = hostPort.lastIndexOf(":")
+                val host = if (lastColon >= 0) hostPort.substring(0, lastColon) else hostPort
+                val port = if (lastColon >= 0) hostPort.substring(lastColon + 1).toIntOrNull() ?: 443 else 443
+                // Parse query params manually
+                val sniFromQuery = queryStr.split("&")
+                    .mapNotNull { val kv = it.split("=", limit = 2); if (kv.size == 2 && kv[0] == "sni") kv[1] else null }
+                    .firstOrNull()
                 return ParsedUri(
                     protocol = "trojan",
-                    host = u.host, port = u.port.takeIf { it > 0 } ?: 443,
+                    host = host, port = port,
                     uuid = null, password = password, method = null, alterId = null,
                     network = "", security = "tls",
-                    sni = u.getQueryParameter("sni") ?: u.host,
+                    sni = sniFromQuery ?: host,
                     path = "", hostHeader = "", flow = "", pbk = "", sid = ""
                 )
             } else if (uri.startsWith("ss://")) {
