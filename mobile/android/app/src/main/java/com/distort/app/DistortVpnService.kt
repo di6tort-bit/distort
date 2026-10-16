@@ -142,7 +142,7 @@ class DistortVpnService : VpnService() {
         val notif = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("DISTORT")
             .setContentText(text)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(android.R.drawable.sym_def_app_icon)
             .setOngoing(true)
             .build()
         startForeground(NOTIF_ID, notif)
