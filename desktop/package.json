@@ -13,7 +13,7 @@
     "dist:portable": "bun run build:desktop && electron-builder --win portable",
     "dist:all": "bun run build:desktop && electron-builder --win nsis --win portable",
     "pack": "electron-builder --dir",
-    "postinstall": "electron-builder install-app-deps"
+    "rebuild:native": "electron-rebuild -f -w better-sqlite3"
   },
   "build": {
     "appId": "com.distort.desktop",
@@ -31,7 +31,13 @@
     "files": [
       "dist/**/*",
       "resources/**/*",
-      "package.json"
+      "package.json",
+      "node_modules/better-sqlite3/**/*",
+      "node_modules/bindings/**/*",
+      "node_modules/file-uri-to-path/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/better-sqlite3/**/*"
     ],
     "extraResources": [
       {

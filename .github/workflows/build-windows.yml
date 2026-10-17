@@ -21,10 +21,14 @@ jobs:
           DATABASE_URL: "file:/tmp/distort.db"
       - name: Install desktop deps
         working-directory: desktop
-        run: bun install
+        run: bun install --ignore-scripts
       - name: Rebuild native modules for Electron
         working-directory: desktop
         run: bunx electron-rebuild -f -w better-sqlite3
+        env:
+          # electron-rebuild downloads prebuilt binaries when available.
+          # better-sqlite3 ships prebuilds for win32-x64 + electron ABI.
+          npm_config_build_from_source: "false"
       - name: Generate icons
         working-directory: desktop
         run: bun run build-icons.mjs
