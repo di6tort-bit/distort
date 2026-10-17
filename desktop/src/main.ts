@@ -1,7 +1,7 @@
 // DISTORT Desktop — Electron main process
 // A 100% free, anti-censorship VPN client. Designed to outperform Nekoray & Hiddify.
 
-import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, session } from "electron";
+import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, session, dialog } from "electron";
 import * as path from "path";
 import * as fs from "fs";
 import * as http from "http";
@@ -1707,6 +1707,40 @@ async function handleCompanionApiRequest(
 }
 
 // Start the companion control API server on 127.0.0.1:10810.
+// ---------------------------------------------------------------------------
+// Companion API server
+// ---------------------------------------------------------------------------
+
+// ALLOWED ORIGINS — strict allowlist (addresses user review issue P1-ب).
+// Using "*" is NOT safe even on localhost: a malicious web page on any origin
+// the user visits could send requests to 127.0.0.1:10810 and control the
+// tunnel (start/stop/verify). We MUST verify the Origin header against an
+// explicit allowlist.
+//
+// The web dashboard runs on:
+//   - Dev: http://localhost:3000
+//   - Prod: https://distort.app (when deployed)
+//
+// We also allow the Electron renderer (app://) for when the dashboard is
+// bundled inside the desktop app itself.
+const COMPANION_ALLOWED_ORIGINS = new Set<string>([
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "https://distort.app",
+  "https://www.distort.app",
+  "app://",
+  "file://", // for bundled dashboard
+]);
+
+function isAllowedOrigin(origin: string | undefined): boolean {
+  if (!origin) return false;
+  // Exact match against the allowlist
+  if (COMPANION_ALLOWED_ORIGINS.has(origin)) return true;
+  // Allow the Electron renderer's custom scheme
+  if (origin.startsWith("app://")) return true;
+  return false;
+}
+
 // Idempotent — calling it twice is a no-op.
 function startCompanionApiServer(): void {
   if (companionApiServer) {
@@ -1715,15 +1749,30 @@ function startCompanionApiServer(): void {
   }
 
   const server = http.createServer((req, res) => {
-    // CORS — allow the web dashboard (http://localhost:3000) and the
-    // production Next.js standalone (http://localhost:38571) to call us.
-    // Using "*" is safe here because the server is bound to 127.0.0.1 only
-    // (no remote can reach it regardless of CORS).
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    // SECURITY (P1-ب): strict Origin allowlist instead of "*".
+    // A malicious web page on any origin the user visits could otherwise
+    // send requests to 127.0.0.1:10810 and control the tunnel.
+    const origin = req.headers.origin;
+    if (isAllowedOrigin(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Vary", "Origin"); // cache correctly per-origin
+    } else {
+      // Don't set CORS header — browser will block the response.
+      // (We still process the request in case it's a same-origin call
+      // from the Electron renderer, which doesn't send an Origin header.)
+    }
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    // Don't allow credentials — we don't use cookies here
+    res.setHeader("Access-Control-Allow-Credentials", "false");
 
     if (req.method === "OPTIONS") {
+      // Preflight — reject if origin not allowed
+      if (origin && !isAllowedOrigin(origin)) {
+        res.writeHead(403);
+        res.end("Forbidden origin");
+        return;
+      }
       res.writeHead(204);
       res.end();
       return;
@@ -1735,9 +1784,21 @@ function startCompanionApiServer(): void {
     );
     const pathname = fullUrl.pathname;
 
+    // SECURITY (P1-ب): also check the Host header to prevent DNS rebinding.
+    // A malicious site could set up "evil.com" to resolve to 127.0.0.1 and
+    // then fetch("http://evil.com:10810/api/tunnel/start"). The browser
+    // would send Host: evil.com:10810, which we reject.
+    const hostHeader = req.headers.host || "";
+    const expectedHost = `${COMPANION_API_HOST}:${COMPANION_API_PORT}`;
+    if (hostHeader !== expectedHost) {
+      log.warn(`[companion-api] Rejected request with Host header "${hostHeader}" (expected "${expectedHost}") — possible DNS rebinding attempt`);
+      sendJson(res, 403, { ok: false, error: "Forbidden Host header" });
+      return;
+    }
+
     // Log the request line WITHOUT the query string or body — configUri
     // lives in the body and must never appear in logs.
-    log.info(`[companion-api] ${req.method} ${pathname}`);
+    log.info(`[companion-api] ${req.method} ${pathname} (origin=${origin || "none"})`);
 
     // Read the request body (POST only). Cap at COMPANION_MAX_BODY_BYTES
     // to prevent memory exhaustion from oversized payloads.
@@ -1842,6 +1903,233 @@ ipcMain.handle("app:version", async () => {
 ipcMain.handle("app:platform", async () => {
   return { platform: process.platform, arch: process.arch };
 });
+
+// ---------------------------------------------------------------------------
+// Auto-updater — electron-updater with GitHub Releases provider
+// ---------------------------------------------------------------------------
+// HONEST LIMITATION: the updater only fully works for SIGNED builds. Our
+// current Windows builds are NOT code-signed (no EV/authenticode certificate),
+// so electron-updater will still CHECK for updates and DOWNLOAD them, but
+// `quitAndInstall()` may pop a SmartScreen / "unknown publisher" warning
+// because the new installer is also unsigned. electron-builder also
+// generates latest.yml automatically — that file MUST be published alongside
+// the .exe assets in the GitHub Release for the updater to find the update.
+//
+// The publish config lives in package.json → build.publish = { provider: github,
+// owner: "di6tort-bit", repo: "distort" }. In CI we pass `--publish onTag`
+// so a `git tag v1.2.3 && git push --tags` triggers a real release.
+//
+// electron-store persists in app.getPath("userData"), which is OUTSIDE the
+// install directory — so user settings, subscriptions, cached configs and
+// tunnel state all SURVIVE an update. Nothing to migrate.
+//
+// Until we publish a real release with proper versioning AND signing, this
+// code: (a) runs at startup, (b) checks the GitHub Releases API for a newer
+// version, (c) logs the result, (d) forwards status to the renderer for the
+// UI badge. If no release exists yet (current state), it just logs
+// "update-not-available" and exits cleanly.
+let autoUpdaterModule: any | null = null;
+let updateCheckTimer: NodeJS.Timeout | null = null;
+
+function sendToRenderer(channel: string, payload?: unknown): void {
+  try {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(channel, payload);
+    }
+  } catch (e: any) {
+    log.warn(`[auto-updater] Failed to send IPC "${channel}": ${e?.message}`);
+  }
+}
+
+function setupAutoUpdater(): void {
+  // Lazy-require so the build doesn't fail in environments where
+  // electron-updater's native bits aren't available (e.g. dev without
+  // electron-builder's install-app-deps). We also wrap in try/catch so
+  // any failure here is non-fatal — auto-update is a convenience, not a
+  // correctness-critical feature.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    autoUpdaterModule = require("electron-updater").autoUpdater;
+  } catch (e: any) {
+    log.warn(`[auto-updater] electron-updater not available — auto-update disabled. Reason: ${e?.message}`);
+    sendToRenderer("update-error", { message: `Auto-updater unavailable: ${e?.message || "unknown error"}` });
+    return;
+  }
+
+  const updater = autoUpdaterModule;
+  if (!updater) {
+    log.warn("[auto-updater] electron-updater returned no autoUpdater object — disabled");
+    sendToRenderer("update-error", { message: "Auto-updater unavailable: no autoUpdater export" });
+    return;
+  }
+
+  // In dev mode (DISTORT_DEV set, or !app.isPackaged) electron-updater has
+  // no app-update.yml to read and will throw "Update config file not found".
+  // We still wire up the listeners so the renderer can render an honest
+  // "not available in dev" state, but we skip the actual check.
+  const isDev = !!process.env.DISTORT_DEV || !app.isPackaged;
+
+  // Configuration
+  updater.autoDownload = true;             // download in background as soon as available
+  updater.autoInstallOnAppQuit = true;    // install silently on next quit
+  // We explicitly do NOT disable code-signature verification in production
+  // (win.verifyUpdateCodeSignature in package.json is already false because
+  // we have no cert — that only disables electron-builder's BUILDER-time
+  // check, not the runtime updater check). When we DO get a cert, flip
+  // verifyUpdateCodeSignature back to true and remove this comment.
+
+  // Allow auto-updater's own logs to flow into our electron-log sink.
+  try {
+    updater.logger = log;
+  } catch {}
+
+  // --- Event wiring ---
+  updater.on("checking-for-update", () => {
+    log.info("[auto-updater] Checking for update…");
+    sendToRenderer("update-checking");
+  });
+
+  updater.on("update-available", (info: any) => {
+    log.info(`[auto-updater] Update available: v${info?.version || "?"} (current v${app.getVersion()})`);
+    sendToRenderer("update-available", {
+      version: info?.version ?? null,
+      releaseDate: info?.releaseDate ?? null,
+      releaseNotes: info?.releaseNotes ?? null,
+    });
+  });
+
+  updater.on("update-not-available", (info: any) => {
+    log.info(`[auto-updater] Up to date (v${app.getVersion()})`);
+    sendToRenderer("update-not-available", { version: info?.version ?? app.getVersion() });
+  });
+
+  updater.on("error", (err: Error) => {
+    log.error(`[auto-updater] Error: ${err?.message}`);
+    sendToRenderer("update-error", { message: err?.message || String(err) });
+  });
+
+  updater.on("download-progress", (progress: any) => {
+    // progress: { percent, transferred, total, bytesPerSecond }
+    const pct = typeof progress?.percent === "number" ? Math.round(progress.percent) : null;
+    log.info(`[auto-updater] Downloading update: ${pct ?? "?"}% (${progress?.transferred ?? 0}/${progress?.total ?? 0} bytes)`);
+    sendToRenderer("update-downloading", {
+      percent: pct,
+      transferred: progress?.transferred ?? 0,
+      total: progress?.total ?? 0,
+      bytesPerSecond: progress?.bytesPerSecond ?? 0,
+    });
+  });
+
+  updater.on("update-downloaded", async (info: any) => {
+    log.info(`[auto-updater] Update downloaded: v${info?.version || "?"} — ready to install on quit`);
+    sendToRenderer("update-downloaded", {
+      version: info?.version ?? null,
+      releaseDate: info?.releaseDate ?? null,
+    });
+
+    // Prompt the user — they may be mid-tunnel and not want to restart now.
+    // The renderer also gets the event so it can show a custom toast, but we
+    // additionally show a native dialog (works even if the renderer is on
+    // the offline page or a non-dashboard route).
+    try {
+      const choice = await dialog.showMessageBox({
+        type: "info",
+        title: "DISTORT Update Ready",
+        message: "A new version is available.",
+        detail: `Version ${info?.version || "(unknown)"} has been downloaded and will be installed. Install and restart now? Your settings and saved configs are preserved.`,
+        buttons: ["Install & Restart", "Later"],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      if (choice.response === 0) {
+        log.info("[auto-updater] User chose to install now — calling quitAndInstall()");
+        // quitAndInstall() closes all windows, runs the installer, and relaunches.
+        // isForceRunAfter=true ensures the app restarts after install completes.
+        isQuitting = true; // skip the minimize-to-tray intercept in mainWindow 'close'
+        updater.quitAndInstall(false, true);
+      } else {
+        log.info("[auto-updater] User chose to defer — will install on next quit (autoInstallOnAppQuit=true)");
+      }
+    } catch (e: any) {
+      log.warn(`[auto-updater] Dialog failed: ${e?.message}. Update will install on next quit.`);
+    }
+  });
+
+  // --- Kick off the check loop ---
+  if (isDev) {
+    log.info("[auto-updater] Skipping check in dev mode (electron-updater requires a packaged app).");
+    sendToRenderer("update-not-available", { version: app.getVersion(), dev: true });
+    return;
+  }
+
+  // First check immediately (well, after a short delay so the app finishes
+  // booting — checking during the very first tick races with network setup
+  // on slow machines).
+  setTimeout(() => {
+    updater.checkForUpdates().catch((err: Error) => {
+      log.warn(`[auto-updater] Initial check failed: ${err?.message}`);
+    });
+  }, 5_000);
+
+  // Then every 30 minutes. electron-updater is smart enough to not re-download
+  // if the version hasn't changed.
+  const CHECK_INTERVAL_MS = 30 * 60 * 1000;
+  updateCheckTimer = setInterval(() => {
+    updater.checkForUpdates().catch((err: Error) => {
+      log.warn(`[auto-updater] Periodic check failed: ${err?.message}`);
+    });
+  }, CHECK_INTERVAL_MS);
+
+  log.info(`[auto-updater] Initialised — checking every ${CHECK_INTERVAL_MS / 60_000}min (provider: github/di6tort-bit/distort)`);
+}
+
+// IPC handler — renderer can request a manual check (e.g. a "Check for updates"
+// button in Settings). Returns a status object so the renderer doesn't need
+// to round-trip through the event channel for a one-shot check.
+ipcMain.handle("update:check-now", async () => {
+  if (!autoUpdaterModule) {
+    return { ok: false, error: "Auto-updater not available" };
+  }
+  try {
+    const result = await autoUpdaterModule.checkForUpdates();
+    return {
+      ok: true,
+      updateInfo: result?.updateInfo
+        ? {
+            version: result.updateInfo.version,
+            releaseDate: result.updateInfo.releaseDate,
+          }
+        : null,
+      currentVersion: app.getVersion(),
+    };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+});
+
+// IPC handler — renderer can install a downloaded update immediately (used
+// by the "Install now" button in our own toast, as an alternative to the
+// native dialog).
+ipcMain.handle("update:install-now", async () => {
+  if (!autoUpdaterModule) {
+    return { ok: false, error: "Auto-updater not available" };
+  }
+  try {
+    isQuitting = true;
+    autoUpdaterModule.quitAndInstall(false, true);
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+});
+
+// Stop the auto-updater's periodic check (called on app quit).
+function stopAutoUpdater(): void {
+  if (updateCheckTimer) {
+    clearInterval(updateCheckTimer);
+    updateCheckTimer = null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Lifecycle
@@ -1969,6 +2257,16 @@ app.whenReady().then(async () => {
   // proxy (10809) — see comment near COMPANION_API_PORT for details.
   startCompanionApiServer();
 
+  // Start the auto-updater (electron-updater + GitHub Releases).
+  // Non-fatal if it fails: wraps everything in try/catch and just logs.
+  // Skips the actual check in dev mode (electron-updater requires a packaged
+  // app to read app-update.yml).
+  try {
+    setupAutoUpdater();
+  } catch (e: any) {
+    log.warn(`[auto-updater] setupAutoUpdater threw (non-fatal): ${e?.message}`);
+  }
+
   // Auto-connect on startup if enabled
   if (store.get("settings.autoConnect")) {
     setTimeout(() => quickConnect(), 1500);
@@ -2065,6 +2363,8 @@ app.on("before-quit", async (e) => {
   await disableKillSwitch();
   // Stop the companion control API server (port 10810).
   stopCompanionApiServer();
+  // Stop the auto-updater's periodic check timer.
+  stopAutoUpdater();
   if (!isQuitting) {
     isQuitting = true;
     app.quit();
@@ -2077,6 +2377,7 @@ process.on("SIGINT", async () => {
   await stopVpnEngine();
   await disableKillSwitch();
   stopCompanionApiServer();
+  stopAutoUpdater();
   process.exit(0);
 });
 process.on("SIGTERM", async () => {
@@ -2084,6 +2385,7 @@ process.on("SIGTERM", async () => {
   await stopVpnEngine();
   await disableKillSwitch();
   stopCompanionApiServer();
+  stopAutoUpdater();
   process.exit(0);
 });
 
@@ -2094,6 +2396,7 @@ process.on("uncaughtException", async (err) => {
     await stopVpnEngine();
     await disableKillSwitch();
     stopCompanionApiServer();
+    stopAutoUpdater();
   } catch {}
   process.exit(1);
 });

@@ -12,6 +12,7 @@ import { SpeedTestView } from "./speed-test-view";
 import { AccountView } from "./account-view";
 import { CommunityMeshView } from "./community-mesh-view";
 import { EmergencyConnectivityView } from "./emergency-connectivity-view";
+import { UpdateIndicator } from "./update-indicator";
 import { useVpnStore } from "@/lib/vpn-store";
 import { Button } from "@/components/ui/button";
 
@@ -134,6 +135,9 @@ export function Dashboard({ onClose }: { onClose: () => void }) {
           </AnimatePresence>
         </div>
       </main>
+
+      {/* Auto-updater badge — only visible in the desktop shell (returns null on web). */}
+      <UpdateIndicator />
     </div>
   );
 }

@@ -10,6 +10,16 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!--
+        In-app update support (UpdateChecker.kt):
+        Allows the app to prompt the system package installer to install an
+        APK downloaded from GitHub Releases. Required on Android 8+ (API 26+)
+        — without it the system installer silently refuses to launch.
+        The user must separately grant "Install unknown apps" for Distort in
+        Settings; the system surfaces that prompt on first install attempt.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <application
         android:allowBackup="true"
         android:icon="@android:drawable/sym_def_app_icon"
@@ -66,6 +76,25 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="vpn" />
         </service>
+
+        <!--
+            FileProvider for in-app APK updates (UpdateChecker.kt).
+            Exposes cacheDir/updates/ to the system package installer via a
+            content:// URI so we can share the downloaded APK file on
+            Android 7+ (API 24+) — file:// URIs trigger FileUriExposedException
+            on those versions.
+            Authority MUST match the string used by UpdateChecker:
+            "${applicationId}.fileprovider".
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 </manifest>

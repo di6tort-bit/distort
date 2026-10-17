@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    FileProvider paths for in-app APK updates (UpdateChecker.kt).
+    <cache-path> maps to Context.getCacheDir() — UpdateChecker downloads
+    APKs to cacheDir/updates/, so we expose the "updates/" subdirectory
+    here. The "name" attribute is just an opaque identifier used in the
+    generated content:// URI; it has no functional meaning beyond that.
+
+    If we ever need to share files from other locations (external cache,
+    files dir, etc.) add additional <external-cache-path>, <files-path>,
+    or <external-files-path> entries here.
+-->
+<paths>
+    <cache-path name="apk_updates" path="updates/" />
+</paths>

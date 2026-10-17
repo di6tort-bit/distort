@@ -3,6 +3,24 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+// ─── Versioning ──────────────────────────────────────────────────────────────
+// versionCode is read from /VERSION_CODE at the repo root (single source of truth
+// shared with the CI workflow that tags releases). The format is a plain integer
+// that strictly increases on every release. The GitHub Actions release job
+// commits a bump to this file as part of the release flow.
+//
+// Env override: VERSION_CODE env var (used by CI to inject a build-specific code).
+// File override: ../../../../VERSION_CODE (relative to app/) — checked in to git.
+//
+// versionName is human-readable ("1.0.4") and parsed by UpdateChecker.kt from the
+// GitHub Releases tag. The tag MUST be "v" + versionName (e.g. v1.0.4).
+def versionCodeFile = rootProject.file('../../VERSION_CODE')
+def versionCodeFromEnv = System.getenv('VERSION_CODE')
+def versionCodeFromEnvInt = versionCodeFromEnv != null ? versionCodeFromEnv.toInteger() : null
+def versionCodeFromFile = versionCodeFile.exists() ? versionCodeFile.text.trim().toInteger() : 1
+def resolvedVersionCode = versionCodeFromEnvInt != null ? versionCodeFromEnvInt : versionCodeFromFile
+def resolvedVersionName = "1.0.${resolvedVersionCode}"
+
 android {
     namespace 'com.distort.app'
     compileSdk 34
@@ -11,11 +29,48 @@ android {
         applicationId "com.distort.app"
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "1.0.0"
+        versionCode resolvedVersionCode
+        versionName resolvedVersionName
         ndk {
             // Only bundle ABIs we actually ship xray for (arm64-v8a, x86_64)
             abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    // ─── Signing ──────────────────────────────────────────────────────────────
+    // Release signing keys are NEVER committed. CI and local builds read them
+    // from environment variables:
+    //
+    //   DISTORT_KEYSTORE_FILE      — absolute path to the .keystore / .jks file
+    //   DISTORT_KEYSTORE_PASSWORD  — keystore password
+    //   DISTORT_KEY_ALIAS          — alias of the release key entry
+    //   DISTORT_KEY_PASSWORD       — password for the release key entry
+    //
+    // If any of these is missing the release build falls back to the debug
+    // signing key (which is fine for local testing but means the resulting APK
+    // cannot be installed over a previously-released production build — Android
+    // refuses to update across different signing keys).
+    //
+    // BACKUP REQUIREMENT: the keystore file MUST be backed up off-machine
+    // (encrypted USB, password manager, etc.). If the release signing key is
+    // lost, in-app updates can no longer be installed — users would have to
+    // uninstall the old app first. There is no recovery path.
+    signingConfigs {
+        release {
+            def keystoreFile = System.getenv('DISTORT_KEYSTORE_FILE')
+            def keystorePass = System.getenv('DISTORT_KEYSTORE_PASSWORD')
+            def keyAlias = System.getenv('DISTORT_KEY_ALIAS')
+            def keyPass = System.getenv('DISTORT_KEY_PASSWORD')
+            if (keystoreFile != null && keystorePass != null && keyAlias != null && keyPass != null) {
+                storeFile file(keystoreFile)
+                storePassword keystorePass
+                keyAlias keyAlias
+                keyPassword keyPass
+                // Enable V2+V3 signing for modern Android (7.0+/9.0+).
+                v1SigningEnabled true
+                v2SigningEnabled true
+                v3SigningEnabled true
+            }
         }
     }
 
@@ -23,14 +78,22 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Use the release signing key if it was configured above; otherwise
+            // fall back to the debug key so the build still produces an APK.
+            signingConfig (signingConfigs.release.storeFile != null
+                ? signingConfigs.release
+                : signingConfigs.debug)
         }
         debug {
             debuggable true
+            // Debug build always uses the debug key (Android's default).
+            signingConfig signingConfigs.debug
         }
     }
 
     // BuildConfig is needed by DashboardWebViewActivity to toggle WebView
-    // debugging (chrome://inspect) in debug builds only.
+    // debugging (chrome://inspect) in debug builds only — and by UpdateChecker
+    // to read VERSION_CODE / VERSION_NAME at runtime.
     buildFeatures {
         buildConfig true
     }
@@ -59,4 +122,7 @@ dependencies {
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.8.4'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0'
+    // androidx.core:core-ktx already pulls in androidx.core which provides
+    // FileProvider — used by UpdateChecker to share the downloaded APK with
+    // the system package installer on Android 7+ (API 24+).
 }

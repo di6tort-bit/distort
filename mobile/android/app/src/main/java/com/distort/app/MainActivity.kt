@@ -14,10 +14,14 @@ import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
 
@@ -28,9 +32,22 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var speedUpdateRunnable: Runnable? = null
 
+    // In-app update checker — created lazily so the Activity doesn't pay
+    // for the constructor cost until first use.
+    private val updateChecker by lazy { UpdateChecker(this) }
+    // Tracks whether an update dialog is already visible so the auto-check
+    // and a manual button tap don't both pop a dialog at the same time.
+    private var updateDialogShowing = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUI())
+        // Auto-check for updates shortly after launch. We delay 3s so the
+        // first frame paints first; failures are silent (see checkForUpdate).
+        lifecycleScope.launch {
+            delay(3000)
+            checkForUpdate(showToastIfUpToDate = false, showToastOnError = false)
+        }
     }
 
     private fun buildUI(): View {
@@ -315,18 +332,199 @@ class MainActivity : AppCompatActivity() {
         }
         container.addView(help)
 
+        // === In-app update checker ===
+        //
+        // Tapping this button hits GitHub Releases for the latest published
+        // APK. If a newer version is available we show a dialog with the
+        // release notes + a Download & Install button. The auto-check on
+        // launch will also pop the same dialog silently 3s after the
+        // activity creates.
+        //
+        // HONEST NOTE: installing a release-signed APK over a debug-signed
+        // build (or vice versa) will be REFUSED by the system installer
+        // due to signature mismatch — the user must uninstall first. This
+        // is by Android design and we can't bypass it.
+        val checkUpdatesBtn = Button(this).apply {
+            text = "🔄 CHECK FOR UPDATES"
+            setBackgroundColor(Color.parseColor("#0d1426"))
+            setTextColor(Color.parseColor("#5cf2ff"))
+            textSize = 11f
+            letterSpacing = 0.1f
+            setPadding(32, 16, 32, 16)
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            params.setMargins(0, 16, 0, 0)
+            layoutParams = params
+            setOnClickListener {
+                checkForUpdate(
+                    showToastIfUpToDate = true,
+                    showToastOnError = true
+                )
+            }
+        }
+        container.addView(checkUpdatesBtn)
+
         // Version
         val version = TextView(this).apply {
-            text = "v1.0.2 · 100% Free · MIT"
+            // BuildConfig.VERSION_NAME is injected by gradle from VERSION_CODE
+            // (e.g. "1.0.4") — keeps the displayed version honest with the
+            // installed versionCode.
+            text = "v${BuildConfig.VERSION_NAME} · 100% Free · MIT"
             textSize = 10f
             setTextColor(Color.parseColor("#8aa0c4"))
             gravity = Gravity.CENTER
-            setPadding(0, 32, 0, 0)
+            setPadding(0, 16, 0, 0)
             letterSpacing = 0.1f
         }
         container.addView(version)
 
         return container
+    }
+
+    // ─── In-app updates ───────────────────────────────────────────────
+    //
+    // checkForUpdate() queries GitHub Releases for the latest APK and shows
+    // a dialog if a newer version exists. The auto-check on launch calls
+    // this with both showToast* flags false (silent); the manual button
+    // calls it with both true (loud).
+    private fun checkForUpdate(
+        showToastIfUpToDate: Boolean,
+        showToastOnError: Boolean
+    ) {
+        if (updateDialogShowing) return
+        Toast.makeText(this, "Checking for updates…", Toast.LENGTH_SHORT).show()
+        lifecycleScope.launch {
+            val update = updateChecker.checkForUpdate()
+            if (update == null) {
+                // checkForUpdate returns null for: (a) up-to-date,
+                // (b) no APK asset in release, (c) network/parse error.
+                // We can't distinguish (a) from (c) here without an extra
+                // return channel — by design, the auto-check stays silent
+                // in all of those cases.
+                if (showToastIfUpToDate) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "Distort is up to date (v${BuildConfig.VERSION_NAME})",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                }
+                return@launch
+            }
+            showUpdateAvailableDialog(update)
+        }
+    }
+
+    private fun showUpdateAvailableDialog(update: UpdateChecker.UpdateInfo) {
+        updateDialogShowing = true
+        val sizeMb = if (update.apkSize > 0)
+            String.format("%.1f MB", update.apkSize / 1_048_576.0)
+        else "unknown size"
+
+        val notes = if (update.releaseNotes.isNotEmpty()) {
+            // Cap release notes at ~500 chars so the dialog doesn't get
+            // enormous on a phone screen. Markdown is shown as plain text
+            // (Android AlertDialog doesn't render markdown).
+            val raw = update.releaseNotes.take(500)
+            if (update.releaseNotes.length > 500) "$raw…" else raw
+        } else {
+            "(no release notes provided)"
+        }
+
+        val message = buildString {
+            appendLine("A new version of Distort is available.")
+            appendLine()
+            appendLine("Installed:  v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
+            appendLine("Available:  ${update.tag} (code ${update.versionCode})")
+            appendLine("APK size:   $sizeMb")
+            appendLine()
+            appendLine("Release notes:")
+            append(notes)
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Update available")
+            .setMessage(message)
+            .setPositiveButton("Download & Install") { _, _ ->
+                updateDialogShowing = false
+                downloadAndInstall(update)
+            }
+            .setNegativeButton("Later") { _, _ ->
+                updateDialogShowing = false
+            }
+            .setOnCancelListener {
+                updateDialogShowing = false
+            }
+            .show()
+    }
+
+    private fun downloadAndInstall(update: UpdateChecker.UpdateInfo) {
+        // Progress dialog with a horizontal ProgressBar + a percentage label.
+        // We keep references so we can update them from the download coroutine.
+        val progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            max = 100
+            progress = 0
+        }
+        val progressLabel = TextView(this).apply {
+            text = "Downloading ${update.apkName}… 0%"
+            textSize = 12f
+            setTextColor(Color.parseColor("#5cf2ff"))
+            setPadding(0, 16, 0, 0)
+            gravity = Gravity.CENTER
+        }
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 32, 48, 16)
+            addView(progressBar)
+            addView(progressLabel)
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Downloading update")
+            .setView(container)
+            .setCancelable(false)
+            // No buttons — we dismiss programmatically when the download
+            // either completes or fails.
+            .create()
+        dialog.show()
+
+        lifecycleScope.launch {
+            try {
+                val apkFile = updateChecker.downloadApk(update) { frac ->
+                    // UpdateChecker invokes onProgress from the IO dispatcher;
+                    // the ProgressBar / TextView are not thread-safe so we
+                    // hop to the main thread via the Handler.
+                    val percent = (frac * 100f).toInt().coerceIn(0, 100)
+                    handler.post {
+                        if (dialog.isShowing) {
+                            progressBar.progress = percent
+                            progressLabel.text =
+                                "Downloading ${update.apkName}… $percent%"
+                        }
+                    }
+                }
+                dialog.dismiss()
+                Toast.makeText(
+                    this@MainActivity,
+                    "Download complete — launching installer",
+                    Toast.LENGTH_SHORT
+                ).show()
+                updateChecker.installApk(apkFile)
+            } catch (e: Exception) {
+                dialog.dismiss()
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Update failed")
+                    .setMessage(
+                        "Couldn't download the update.\n\n" +
+                        "Reason: ${e.javaClass.simpleName}: ${e.message}\n\n" +
+                        "Check your network connection and try again, or " +
+                        "download the APK manually from GitHub Releases."
+                    )
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
+        }
     }
 
     // Cache config to SharedPreferences for Quick Connect

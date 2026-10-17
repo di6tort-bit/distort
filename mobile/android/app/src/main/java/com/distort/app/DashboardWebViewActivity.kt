@@ -194,20 +194,36 @@ class DashboardWebViewActivity : AppCompatActivity() {
             }
 
             private fun isTrustedOrigin(url: String): Boolean {
-                // Match by scheme://host[:port] prefix against the trust list.
-                // This is intentionally strict — we don't do fancy URL parsing
-                // because the trusted origins are short and known.
-                val schemeEnd = url.indexOf("://")
-                if (schemeEnd < 0) return false
-                val afterScheme = url.substring(schemeEnd + 3)
-                // Strip path/query/fragment
-                val origin = url.substring(0, schemeEnd + 3) +
-                    afterScheme.substringBefore('/').let { host ->
-                        // Include port if present
-                        if (host.contains(':')) host else "$host"
+                // SECURITY (P1-ج): use java.net.URI to parse scheme + host + port
+                // EXACTLY, then compare against the trust list.
+                //
+                // The previous implementation used `url.startsWith(it)`, which is
+                // vulnerable to prefix attacks: "https://distort.app.evil.com"
+                // would match "https://distort.app" and get native bridge access.
+                //
+                // We now build the canonical origin string (scheme://host[:port])
+                // and do an EXACT match against TRUSTED_ORIGINS.
+                try {
+                    val parsed = java.net.URI(url)
+                    val scheme = parsed.scheme?.lowercase() ?: return false
+                    val host = parsed.host?.lowercase() ?: return false
+                    val port = parsed.port // -1 if not specified
+
+                    // Build the canonical origin string
+                    val origin = when {
+                        // Default ports — omit from origin
+                        (scheme == "https" && port == 443) || (scheme == "http" && port == 80) ->
+                            "$scheme://$host"
+                        port > 0 ->
+                            "$scheme://$host:$port"
+                        else ->
+                            "$scheme://$host"
                     }
-                // The origin should be exactly one of TRUSTED_ORIGINS
-                return TRUSTED_ORIGINS.any { url.startsWith(it) }
+                    return TRUSTED_ORIGINS.contains(origin)
+                } catch (e: Exception) {
+                    Log.e(TAG, "isTrustedOrigin: failed to parse URL '$url': ${e.message}")
+                    return false
+                }
             }
         }
 

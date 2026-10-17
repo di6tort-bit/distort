@@ -56,6 +56,46 @@ contextBridge.exposeInMainWorld("distort", {
     version: () => ipcRenderer.invoke("app:version"),
     platform: () => ipcRenderer.invoke("app:platform"),
   },
+  // Auto-updater — events flow from main → renderer; renderer can also
+  // trigger a manual check or install. The renderer should register all
+  // the listeners it cares about; missing channels just get ignored.
+  updater: {
+    onChecking: (cb: () => void) => {
+      const handler = () => cb();
+      ipcRenderer.on("update-checking", handler);
+      return () => ipcRenderer.removeListener("update-checking", handler);
+    },
+    onAvailable: (cb: (info: { version: string | null; releaseDate?: string | null; releaseNotes?: unknown }) => void) => {
+      const handler = (_e: unknown, info: any) => cb(info);
+      ipcRenderer.on("update-available", handler);
+      return () => ipcRenderer.removeListener("update-available", handler);
+    },
+    onNotAvailable: (cb: (info: { version: string; dev?: boolean }) => void) => {
+      const handler = (_e: unknown, info: any) => cb(info);
+      ipcRenderer.on("update-not-available", handler);
+      return () => ipcRenderer.removeListener("update-not-available", handler);
+    },
+    onDownloading: (cb: (progress: { percent: number | null; transferred: number; total: number; bytesPerSecond: number }) => void) => {
+      const handler = (_e: unknown, progress: any) => cb(progress);
+      ipcRenderer.on("update-downloading", handler);
+      return () => ipcRenderer.removeListener("update-downloading", handler);
+    },
+    onDownloaded: (cb: (info: { version: string | null; releaseDate?: string | null }) => void) => {
+      const handler = (_e: unknown, info: any) => cb(info);
+      ipcRenderer.on("update-downloaded", handler);
+      return () => ipcRenderer.removeListener("update-downloaded", handler);
+    },
+    onError: (cb: (err: { message: string }) => void) => {
+      const handler = (_e: unknown, err: any) => cb(err);
+      ipcRenderer.on("update-error", handler);
+      return () => ipcRenderer.removeListener("update-error", handler);
+    },
+    // Manual one-shot check (returns a status object, doesn't go through
+    // the event channel). Useful for a "Check for updates" button.
+    checkNow: () => ipcRenderer.invoke("update:check-now"),
+    // Install a downloaded update immediately (calls quitAndInstall).
+    installNow: () => ipcRenderer.invoke("update:install-now"),
+  },
   // Navigation (from tray)
   onNavigate: (cb: (view: string) => void) => {
     const handler = (_e: unknown, view: string) => cb(view);
