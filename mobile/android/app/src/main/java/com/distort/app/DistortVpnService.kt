@@ -128,12 +128,22 @@ class DistortVpnService : VpnService() {
             xrayBin.setExecutable(true)
             Log.i(TAG, "xray binary: ${xrayBin.absolutePath} (${xrayBin.length()} bytes)")
 
+            // Require a REAL config URI — no fallback to 'freedom' (which would
+            // create a false 'connected' state without actually tunneling).
+            if (configUri.isNullOrEmpty() || configUri.length < 10) {
+                Log.e(TAG, "No real config_uri provided — refusing to start VPN")
+                showNotification("No VPN config selected")
+                stopVpn()
+                return
+            }
+
             // Build the real xray config using the provided URI (real credentials)
-            val config = if (configUri != null && configUri.length > 10) {
-                buildRealConfig(configUri, tunFd)
-            } else {
-                Log.w(TAG, "No config_uri provided — using placeholder (will not actually tunnel)")
-                buildFallbackConfig(host, port, protocol, tunFd)
+            val config = buildRealConfig(configUri, tunFd)
+            if (config == null) {
+                Log.e(TAG, "Failed to build valid xray config from URI — refusing to start")
+                showNotification("Invalid VPN config")
+                stopVpn()
+                return
             }
 
             val configFile = File(cacheDir, "xray-config.json")
@@ -200,31 +210,59 @@ class DistortVpnService : VpnService() {
 
     // Build a REAL xray config from a vmess/vless/trojan/ss URI.
     // Uses the TUN fd for system-wide tunneling.
-    private fun buildRealConfig(uri: String, tunFd: Int): String {
+    // Returns null if the URI is invalid — the caller must NOT start the service
+    // without a valid config, to avoid false "connected" state.
+    private fun buildRealConfig(uri: String, tunFd: Int): String? {
         // Parse the URI to extract real credentials
         val parsed = parseVpnUri(uri)
         if (parsed == null) {
-            Log.w(TAG, "Could not parse URI, using fallback")
-            return buildFallbackConfig("", 0, "freedom", tunFd)
+            Log.e(TAG, "Could not parse URI — refusing to start VPN")
+            return null
+        }
+
+        // Require a real UUID for vmess/vless, real password for trojan/ss
+        when (parsed.protocol) {
+            "vmess", "vless" -> {
+                if (parsed.uuid.isNullOrEmpty()) {
+                    Log.e(TAG, "${parsed.protocol} requires a real UUID — refusing to start")
+                    return null
+                }
+            }
+            "trojan" -> {
+                if (parsed.password.isNullOrEmpty()) {
+                    Log.e(TAG, "trojan requires a real password — refusing to start")
+                    return null
+                }
+            }
+            "ss" -> {
+                if (parsed.password.isNullOrEmpty() || parsed.method.isNullOrEmpty()) {
+                    Log.e(TAG, "shadowsocks requires real password + method — refusing to start")
+                    return null
+                }
+            }
+            else -> {
+                Log.e(TAG, "Unsupported protocol: ${parsed.protocol}")
+                return null
+            }
         }
 
         val outbound = when (parsed.protocol) {
             "vmess" -> """
-                {"tag":"distort-out","protocol":"vmess","settings":{"vnext":[{"address":"${parsed.host}","port":${parsed.port},"users":[{"id":"${parsed.uuid ?: ""}","alterId":${parsed.alterId ?: 0},"security":"auto"}]}]},"streamSettings":${buildStreamSettings(parsed)}}
+                {"tag":"distort-out","protocol":"vmess","settings":{"vnext":[{"address":"${parsed.host}","port":${parsed.port},"users":[{"id":"${parsed.uuid}","alterId":${parsed.alterId ?: 0},"security":"auto"}]}]},"streamSettings":${buildStreamSettings(parsed)}}
             """.trimIndent()
             "vless" -> {
                 val flow = if (parsed.flow.isNotEmpty()) ""","flow":"${parsed.flow}"""" else ""
                 """
-                {"tag":"distort-out","protocol":"vless","settings":{"vnext":[{"address":"${parsed.host}","port":${parsed.port},"users":[{"id":"${parsed.uuid ?: ""}","encryption":"none"$flow}]}]},"streamSettings":${buildStreamSettings(parsed)}}
+                {"tag":"distort-out","protocol":"vless","settings":{"vnext":[{"address":"${parsed.host}","port":${parsed.port},"users":[{"id":"${parsed.uuid}","encryption":"none"$flow}]}]},"streamSettings":${buildStreamSettings(parsed)}}
                 """.trimIndent()
             }
             "trojan" -> """
-                {"tag":"distort-out","protocol":"trojan","settings":{"servers":[{"address":"${parsed.host}","port":${parsed.port},"password":"${parsed.password ?: ""}"}]},"streamSettings":${buildStreamSettings(parsed)}}
+                {"tag":"distort-out","protocol":"trojan","settings":{"servers":[{"address":"${parsed.host}","port":${parsed.port},"password":"${parsed.password}"}]},"streamSettings":${buildStreamSettings(parsed)}}
             """.trimIndent()
             "ss" -> """
-                {"tag":"distort-out","protocol":"shadowsocks","settings":{"servers":[{"address":"${parsed.host}","port":${parsed.port},"method":"${parsed.method ?: "chacha20-ietf-poly1305"}","password":"${parsed.password ?: ""}"}]}}
+                {"tag":"distort-out","protocol":"shadowsocks","settings":{"servers":[{"address":"${parsed.host}","port":${parsed.port},"method":"${parsed.method}","password":"${parsed.password}"}]}}
             """.trimIndent()
-            else -> """{"tag":"distort-out","protocol":"freedom"}""".trimIndent()
+            else -> return null
         }
 
         return """
@@ -285,17 +323,10 @@ class DistortVpnService : VpnService() {
         return sb.toString()
     }
 
-    private fun buildFallbackConfig(host: String, port: Int, protocol: String, tunFd: Int): String {
-        return """
-        {
-          "log": {"loglevel": "warning"},
-          "inbounds": [
-            {"tag":"tun-in","protocol":"tun","settings":{"fd":$tunFd,"ip":"172.19.0.1","mtu":1420,"autoRoute":true,"strictRoute":true,"hijackDns":true},"sniff":true}
-          ],
-          "outbounds": [{"tag":"distort-out","protocol":"freedom"}]
-        }
-        """.trimIndent()
-    }
+    // NOTE: buildFallbackConfig() has been REMOVED.
+    // Previously, if URI parsing failed, the service would fall back to a 'freedom'
+    // outbound — which routes traffic DIRECTLY (no VPN). This created a false
+    // 'connected' state. Now, the service refuses to start without a valid config.
 
     data class ParsedUri(
         val protocol: String,

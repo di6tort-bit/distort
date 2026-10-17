@@ -389,15 +389,42 @@ async function stopVpnEngine() {
 }
 async function quickConnect() {
     try {
-        const url = `${getLoadUrl()}/api/servers/recommended`;
-        const res = await fetch(url);
-        const data = await res.json();
-        if (data?.server) {
-            await startVpnEngine(data.server, data.recommendedProtocol || "wireguard");
+        // Step 1: Get the recommended Distort server (for display purposes)
+        const recUrl = `${getLoadUrl()}/api/servers/recommended`;
+        const recRes = await fetch(recUrl);
+        const recData = await recRes.json();
+        const recommendedServer = recData?.server;
+        const recommendedProtocol = recData?.recommendedProtocol || "vless";
+        if (!recommendedServer) {
+            electron_log_1.default.error("Quick connect failed: no recommended server");
+            mainWindow?.webContents.send("vpn:error", "No servers available");
+            return;
         }
+        // Step 2: Get a REAL config URI from Community Mesh (with real credentials)
+        // Prefer optimized configs (Reality/TLS/Vision) — these have real UUIDs/passwords
+        const meshUrl = `${getLoadUrl()}/api/imported-configs?bucket=optimized&limit=1`;
+        const meshRes = await fetch(meshUrl);
+        const meshData = await meshRes.json();
+        const realConfig = meshData?.configs?.[0];
+        if (!realConfig || !realConfig.uri) {
+            electron_log_1.default.error("Quick connect failed: no real Community Mesh config available");
+            mainWindow?.webContents.send("vpn:error", "No real VPN config available. Please refresh the Community Mesh subscription or import a config.");
+            return;
+        }
+        electron_log_1.default.info(`Quick connect: using real ${realConfig.protocol} config to ${realConfig.host}:${realConfig.port}`);
+        // Step 3: Build a VpnState server object from the real config
+        const server = {
+            code: realConfig.host,
+            country: realConfig.country || realConfig.host,
+            host: realConfig.host,
+            port: realConfig.port,
+        };
+        // Step 4: Start the VPN engine with the REAL config URI
+        await startVpnEngine(server, realConfig.protocol, realConfig.uri);
     }
     catch (e) {
-        electron_log_1.default.error("Quick connect failed:", e);
+        electron_log_1.default.error("Quick connect failed:", e?.message || e);
+        mainWindow?.webContents.send("vpn:error", `Quick connect failed: ${e?.message || "unknown error"}`);
     }
 }
 function disconnectVpn() {

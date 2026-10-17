@@ -101,6 +101,17 @@ function rand(min: number, max: number) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+// Detect if we're running inside the Electron desktop app (real VPN engine)
+// vs a plain browser (demo mode — no actual tunneling).
+export function isElectron(): boolean {
+  if (typeof window === "undefined") return false;
+  return !!(window as any).distort?.capabilities?.vpnEngine;
+}
+
+export function isDemoMode(): boolean {
+  return !isElectron();
+}
+
 export const useVpnStore = create<VpnStore>()(
   persist(
     (set, get) => ({
@@ -118,7 +129,29 @@ export const useVpnStore = create<VpnStore>()(
 
         set({ state: "connecting", currentServer: server, lastError: null, live: { ...initialLive } });
 
-        // Simulate handshake delay
+        // If running in Electron desktop app, use the REAL VPN engine (xray-core).
+        // The main process will spawn xray, establish the TUN tunnel, and only
+        // report 'connected' after xray confirms handshake.
+        if (isElectron()) {
+          const distort = (window as any).distort;
+          // Get the config URI from the selected Community Mesh config if available
+          // For now, the desktop quickConnect handles this server-side.
+          distort.vpn.connect(server, protocol, (server as any).configUri || null)
+            .then((vpnState: any) => {
+              // The main process sends state updates via onStateChange
+              // This just handles the immediate response
+              if (vpnState?.connected) {
+                set({ state: "connected", live: { ...initialLive, connectedSince: vpnState.startedAt, ping: server.ping || 0 } });
+              }
+            })
+            .catch((e: Error) => {
+              set({ state: "error", lastError: e?.message || "Connection failed" });
+            });
+          return;
+        }
+
+        // DEMO MODE (browser only) — simulate connection for preview purposes.
+        // This does NOT create a real VPN tunnel. No traffic is encrypted.
         const handshakeDelay = protocol === "wireguard" ? 900 : protocol === "v2ray" ? 1300 : protocol === "trojan" ? 1500 : 1100;
 
         window.setTimeout(() => {
@@ -129,7 +162,7 @@ export const useVpnStore = create<VpnStore>()(
             live: { ...initialLive, connectedSince: now, ping: server.ping || rand(18, 70) },
           });
 
-          // Start a live ticker simulating traffic
+          // Start a live ticker simulating traffic (DEMO ONLY)
           const ticker = window.setInterval(() => {
             const s = get();
             if (s.state !== "connected") return;

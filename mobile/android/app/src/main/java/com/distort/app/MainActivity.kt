@@ -113,14 +113,27 @@ class MainActivity : AppCompatActivity() {
     private fun startVpn() {
         val intent = Intent(this, DistortVpnService::class.java).apply {
             action = DistortVpnService.ACTION_CONNECT
-            // Pass a real config URI from the Community Mesh.
-            // For now, use a sample optimized VLESS Reality config.
-            // In production, this would come from the selected Community Mesh config.
+            // Pass a REAL Community Mesh config URI here.
+            // In production, this comes from the config selector UI.
+            // For now, we require a valid URI — the service will NOT start without one.
+            // Example real VLESS Reality config (replace with one from Community Mesh):
             putExtra("config_uri", "")
-            putExtra("host", "de-fra-01.distort.net")
-            putExtra("port", 8443)
+            putExtra("host", "")
+            putExtra("port", 0)
             putExtra("protocol", "vless")
         }
+
+        // If no config_uri is provided, show a clear error instead of starting
+        // a broken connection. The user must select a real config first.
+        if (intent.getStringExtra("config_uri").isNullOrEmpty()) {
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("No VPN config selected")
+                .setMessage("Quick Connect requires a real Community Mesh config.\n\nPlease open the Distort web dashboard, go to Community Mesh, select an optimized config, and use the desktop app's Quick Connect button instead.\n\nThe Android app's config selector is coming in the next release.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+
         startForegroundService(intent)
     }
 

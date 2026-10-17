@@ -23,25 +23,26 @@ jobs:
         working-directory: mobile/android/app/src/main/jniLibs
         shell: bash
         run: |
+          # Pin to a specific version for reproducible builds.
+          XRAY_VERSION="v26.3.27"
+
           # arm64-v8a (most modern phones — ~95% of devices)
           mkdir -p arm64-v8a
-          curl -fsSL -o /tmp/xray-arm64.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-arm64-v8a.zip
+          curl -fsSL -o /tmp/xray-arm64.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-android-arm64-v8a.zip"
           unzip -o /tmp/xray-arm64.zip -d /tmp/arm64-tmp
           cp /tmp/arm64-tmp/xray arm64-v8a/libxray.so
           chmod +x arm64-v8a/libxray.so
           rm -rf /tmp/arm64-tmp /tmp/xray-arm64.zip
 
           # amd64 (x86_64 emulators) — XTLS names it 'amd64' not 'x86_64'
-          # Map it to the x86_64 jniLibs folder so Android finds it
           mkdir -p x86_64
-          curl -fsSL -o /tmp/xray-amd64.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-android-amd64.zip
+          curl -fsSL -o /tmp/xray-amd64.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-android-amd64.zip"
           unzip -o /tmp/xray-amd64.zip -d /tmp/amd64-tmp
           cp /tmp/amd64-tmp/xray x86_64/libxray.so
           chmod +x x86_64/libxray.so
           rm -rf /tmp/amd64-tmp /tmp/xray-amd64.zip
 
-          # Note: XTLS only ships arm64-v8a + amd64 — armeabi-v7a and x86 are not provided.
-          # arm64 covers ~95% of modern Android devices.
+          echo "xray version: ${XRAY_VERSION}"
           echo "Bundled ABIs:"
           ls -lh */libxray.so
       - name: Install Gradle

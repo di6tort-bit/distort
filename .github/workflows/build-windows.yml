@@ -31,10 +31,16 @@ jobs:
         run: |
           mkdir -p resources/bin
           cd resources/bin
-          curl -sL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-windows-64.zip
+          # Pin to a specific version for reproducible builds.
+          # Update manually after verifying the new version works.
+          XRAY_VERSION="v26.3.27"
+          curl -fsSL -o xray.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-windows-64.zip"
           unzip -o xray.zip
           rm xray.zip
           # Verify wintun.dll is present (needed for TUN inbound)
+          if [ ! -f wintun.dll ]; then echo "ERROR: wintun.dll missing"; exit 1; fi
+          if [ ! -f xray.exe ]; then echo "ERROR: xray.exe missing"; exit 1; fi
+          echo "xray version: ${XRAY_VERSION}"
           ls -la wintun.dll xray.exe
       - name: Build desktop app (NSIS installer + portable)
         working-directory: desktop

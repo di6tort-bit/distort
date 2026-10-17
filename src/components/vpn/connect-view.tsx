@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Power, Shield, ShieldCheck, Zap, Activity, Globe2, Radio, Lock } from "lucide-react";
-import { useVpnStore, formatRate, formatBytes, formatDuration, type ServerLite } from "@/lib/vpn-store";
+import { useVpnStore, formatRate, formatBytes, formatDuration, type ServerLite, isDemoMode } from "@/lib/vpn-store";
 import { postJSON } from "@/hooks/use-fetch";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -68,6 +68,13 @@ export function ConnectView({ onPickServer }: { onPickServer: () => void }) {
     <div className="relative flex flex-col items-center justify-center py-8 px-4">
       <div className="mesh-bg" />
       <div className="relative z-10 w-full max-w-md mx-auto flex flex-col items-center">
+        {/* Demo mode badge (shown when not in Electron desktop app) */}
+        {isDemoMode() && (
+          <div className="mb-4 px-3 py-1.5 rounded-lg bg-[#ffb020]/10 border border-[#ffb020]/30 text-[#ffb020] text-[10px] font-tech uppercase tracking-[0.2em] flex items-center gap-1.5">
+            <Shield className="w-3 h-3" />
+            Demo mode — download the desktop app for real VPN tunneling
+          </div>
+        )}
         {/* Climate line */}
         <div className="mb-6 flex items-center gap-2 text-xs font-tech uppercase tracking-[0.2em] text-muted-foreground">
           <span
