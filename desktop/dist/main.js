@@ -631,20 +631,41 @@ async function enableKillSwitch() {
             catch { }
             return; // ABORT — don't proceed to step 4
         }
-        // Step 4: Remove the default route (blocks all other traffic)
+        // Step 4: Remove the default IPv4 route (blocks all other traffic)
         await new Promise((resolve) => {
             exec(`route delete 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} IF ${savedInterfaceIndex}`, (err) => {
                 if (err) {
-                    electron_log_1.default.warn(`Kill switch: could not remove default route: ${err.message}`);
+                    electron_log_1.default.warn(`Kill switch: could not remove default IPv4 route: ${err.message}`);
                 }
                 else {
-                    electron_log_1.default.info("Kill switch: default route removed — all traffic blocked except VPN server");
+                    electron_log_1.default.info("Kill switch: default IPv4 route removed");
                 }
                 resolve();
             });
         });
-        // Step 5: VERIFY the default route is actually gone
-        // Check for an ACTUAL route row with 0.0.0.0/0, not just the string "0.0.0.0"
+        // Step 4b: Also remove IPv6 default route to prevent IPv6 leaks
+        // Without this, traffic can bypass the tunnel via IPv6
+        await new Promise((resolve) => {
+            exec('route delete ::/0', (err) => {
+                if (err) {
+                    electron_log_1.default.warn(`Kill switch: could not remove IPv6 default route: ${err.message} (may not exist)`);
+                }
+                else {
+                    electron_log_1.default.info("Kill switch: IPv6 default route removed — IPv6 leak prevented");
+                }
+                resolve();
+            });
+        });
+        // Step 4c: Disable IPv6 entirely via netsh (extra protection)
+        await new Promise((resolve) => {
+            exec('netsh interface ipv6 6to4 set state state=disabled undoonstop=disabled', (err) => {
+                if (err) {
+                    electron_log_1.default.warn(`Kill switch: could not disable IPv6 6to4: ${err.message}`);
+                }
+                resolve();
+            });
+        });
+        // Step 5: VERIFY the default IPv4 route is actually gone
         const verified = await new Promise((resolve) => {
             exec("route print -4 0.0.0.0", (err, stdout) => {
                 if (err) {
@@ -652,25 +673,55 @@ async function enableKillSwitch() {
                     resolve(false);
                     return;
                 }
-                // Look for an actual default route row: "0.0.0.0    0.0.0.0    <gateway>    <iface>"
-                // NOT just any line containing "0.0.0.0" (headers contain it too)
                 const lines = stdout.split("\n");
                 for (const line of lines) {
-                    // Match: destination=0.0.0.0, netmask=0.0.0.0, then gateway and metric
                     if (/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+\d+\.\d+\.\d+\.\d+/.test(line)) {
                         electron_log_1.default.error(`Kill switch: VERIFICATION FAILED — default route still exists: ${line.trim()}`);
                         resolve(false);
                         return;
                     }
                 }
-                electron_log_1.default.info("Kill switch: VERIFIED — no default route found, kill switch is active");
+                electron_log_1.default.info("Kill switch: VERIFIED — no default IPv4 route found");
                 resolve(true);
             });
         });
-        killSwitchActive = verified;
-        if (verified) {
-            mainWindow?.webContents.send("vpn:kill-switch-activated");
+        // Step 6: If verification failed, RESTORE everything immediately
+        // to avoid leaving the user without internet
+        if (!verified) {
+            electron_log_1.default.error("Kill switch: verification failed — restoring default route and cleaning up");
+            // Restore IPv4 default route
+            await new Promise((resolve) => {
+                exec(`route add 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} metric ${savedDefaultMetric} IF ${savedInterfaceIndex}`, (err) => {
+                    if (err) {
+                        electron_log_1.default.error(`Kill switch: FAILED to restore default route: ${err.message}`);
+                    }
+                    else {
+                        electron_log_1.default.info("Kill switch: default route restored after verification failure");
+                    }
+                    resolve();
+                });
+            });
+            // Restore IPv6 default route
+            await new Promise((resolve) => {
+                exec('netsh interface ipv6 6to4 set state state=enabled undoonstop=enabled', () => resolve());
+            });
+            // Delete the VPN server route we added
+            await new Promise((resolve) => {
+                exec(`route delete ${vpnIp}`, () => resolve());
+            });
+            // Delete backup file
+            try {
+                const routeBackupFile = path.join(electron_1.app.getPath("userData"), "killswitch-backup.json");
+                if (fs.existsSync(routeBackupFile))
+                    fs.unlinkSync(routeBackupFile);
+            }
+            catch { }
+            killSwitchActive = false;
+            return; // Kill switch is NOT active
         }
+        killSwitchActive = true;
+        mainWindow?.webContents.send("vpn:kill-switch-activated");
+        electron_log_1.default.info("Kill switch: ACTIVE — IPv4 + IPv6 routes blocked, VPN server excluded");
     }
     catch (e) {
         electron_log_1.default.warn(`Kill switch error: ${e?.message}`);
@@ -727,6 +778,13 @@ async function disableKillSwitch() {
                 });
             });
         }
+        // Restore IPv6 (6to4)
+        await new Promise((resolve) => {
+            exec('netsh interface ipv6 6to4 set state state=enabled undoonstop=enabled', () => {
+                electron_log_1.default.info("Kill switch: IPv6 6to4 re-enabled");
+                resolve();
+            });
+        });
         // Remove the VPN server specific route (re-resolve in case IP changed)
         const vpnServer = store.get("vpn.server");
         const vpnHost = vpnServer?.host || "";
