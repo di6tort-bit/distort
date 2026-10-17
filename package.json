@@ -15,7 +15,8 @@
     "db:seed": "bun run src/lib/seed.ts",
     "test:parser": "bun run src/lib/__tests__/config-parser.test.ts",
     "test:xray": "bun run src/lib/__tests__/xray-config.test.ts",
-    "test": "bun run src/lib/__tests__/config-parser.test.ts && bun run src/lib/__tests__/xray-config.test.ts"
+    "test:killswitch": "bun run src/lib/__tests__/kill-switch-logic.test.ts",
+    "test": "bun run src/lib/__tests__/config-parser.test.ts && bun run src/lib/__tests__/xray-config.test.ts && bun run src/lib/__tests__/kill-switch-logic.test.ts"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

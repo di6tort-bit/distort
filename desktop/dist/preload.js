@@ -19,6 +19,11 @@ electron_1.contextBridge.exposeInMainWorld("distort", {
             electron_1.ipcRenderer.on("vpn:connecting", handler);
             return () => electron_1.ipcRenderer.removeListener("vpn:connecting", handler);
         },
+        onReconnecting: (cb) => {
+            const handler = (_e, info) => cb(info);
+            electron_1.ipcRenderer.on("vpn:reconnecting", handler);
+            return () => electron_1.ipcRenderer.removeListener("vpn:reconnecting", handler);
+        },
         onExitInfo: (cb) => {
             const handler = (_e, info) => cb(info);
             electron_1.ipcRenderer.on("vpn:exit-info", handler);

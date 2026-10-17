@@ -306,6 +306,8 @@ async function startVpnEngine(server: VpnState["server"], protocol: string, conf
           });
           mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
           log.info("xray-core confirmed working (HTTP through proxy succeeded) — connected");
+          // Start tunnel health monitoring — checks every 30s if tunnel is alive
+          startHealthMonitoring();
         } else if (!startupError) {
           log.warn("xray process alive but HTTP verification failed — NOT marking as connected");
           store.set("vpn", {
@@ -335,6 +337,8 @@ async function startVpnEngine(server: VpnState["server"], protocol: string, conf
   // If we get a valid response containing "ip=", the tunnel is verified working.
   // If ANY step fails → return false (NOT connected). No fallbacks.
   async function verifyHttpThroughProxy(): Promise<boolean> {
+    // Make this function accessible to health monitoring (top-level ref)
+    verifyHttpThroughProxyRef = verifyHttpThroughProxy;
     let socksSocket: any = null;
     let tlsSocket: any = null;
     try {
@@ -490,6 +494,10 @@ async function startVpnEngine(server: VpnState["server"], protocol: string, conf
 }
 
 async function stopVpnEngine(): Promise<void> {
+  // Stop health monitoring when tunnel goes down
+  stopHealthMonitoring();
+  // Reset reconnect attempts
+  reconnectAttempts = 0;
   log.info("Stopping xray-core…");
   if (vpnProcess) {
     try {
@@ -549,7 +557,125 @@ async function stopVpnEngine(): Promise<void> {
 let killSwitchActive = false;
 let savedDefaultGateway = "";
 let savedInterfaceIndex = 0;
-let savedDefaultMetric = 25; // default if we can't read it
+let savedDefaultMetric = 25;
+let healthCheckTimer: NodeJS.Timeout | null = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const HEALTH_CHECK_INTERVAL_MS = 30_000; // 30 seconds
+
+// Tunnel health monitoring — checks every 30s if the tunnel is still alive.
+// If the tunnel dies, triggers smart reconnect with exponential backoff.
+
+// Top-level reference to the verification function (defined inside startVpnEngine)
+let verifyHttpThroughProxyRef: (() => Promise<boolean>) | null = null;
+
+function startHealthMonitoring(): void {
+  if (healthCheckTimer) clearInterval(healthCheckTimer);
+
+  healthCheckTimer = setInterval(async () => {
+    const vpnState = store.get("vpn");
+    if (!vpnState.connected) return; // not connected, nothing to monitor
+
+    // Quick check: is xray process still alive?
+    if (!vpnProcess || vpnProcess.killed) {
+      log.warn("Health check: xray process is dead — triggering reconnect");
+      await smartReconnect();
+      return;
+    }
+
+    // Periodic traffic verification — use the ref set by startVpnEngine
+    if (verifyHttpThroughProxyRef) {
+      try {
+        const verified = await verifyHttpThroughProxyRef();
+        if (!verified) {
+          log.warn("Health check: traffic verification failed — tunnel may be dead");
+          await smartReconnect();
+        } else {
+          // Reset reconnect attempts on successful health check
+          reconnectAttempts = 0;
+        }
+      } catch (e: any) {
+        log.warn(`Health check error: ${e?.message}`);
+      }
+    }
+  }, HEALTH_CHECK_INTERVAL_MS);
+
+  log.info(`Health monitoring started (every ${HEALTH_CHECK_INTERVAL_MS / 1000}s)`);
+}
+
+function stopHealthMonitoring(): void {
+  if (healthCheckTimer) {
+    clearInterval(healthCheckTimer);
+    healthCheckTimer = null;
+    log.info("Health monitoring stopped");
+  }
+}
+
+// Smart reconnect with exponential backoff:
+// Attempt 1: immediate
+// Attempt 2: 2s delay
+// Attempt 3: 4s delay
+// Attempt 4: 8s delay
+// Attempt 5: 16s delay
+// After 5 attempts: give up and notify user
+async function smartReconnect(): Promise<void> {
+  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    log.error(`Smart reconnect: max attempts (${MAX_RECONNECT_ATTEMPTS}) reached — giving up`);
+    store.set("vpn", {
+      ...store.get("vpn"),
+      connected: false,
+      startedAt: null,
+    });
+    mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+    mainWindow?.webContents.send("vpn:error",
+      "Tunnel died and automatic reconnection failed after 5 attempts. " +
+      "The network may be heavily filtered. Please try Quick Connect again manually."
+    );
+    stopHealthMonitoring();
+    return;
+  }
+
+  reconnectAttempts++;
+  const delay = Math.pow(2, reconnectAttempts - 1) * 1000; // 1s, 2s, 4s, 8s, 16s
+  // Add jitter (±25%) to avoid thundering herd
+  const jitter = delay * (0.75 + Math.random() * 0.5);
+  const actualDelay = Math.round(jitter);
+
+  log.info(`Smart reconnect: attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${actualDelay}ms`);
+
+  // Notify UI
+  mainWindow?.webContents.send("vpn:reconnecting", {
+    attempt: reconnectAttempts,
+    maxAttempts: MAX_RECONNECT_ATTEMPTS,
+    delayMs: actualDelay,
+  });
+
+  // Wait with backoff
+  await new Promise((r) => setTimeout(r, actualDelay));
+
+  // Stop current tunnel
+  await stopVpnEngine();
+  await disableKillSwitch();
+
+  // Try to reconnect using quickConnect (which has its own failover)
+  log.info(`Smart reconnect: attempting reconnection (attempt ${reconnectAttempts})`);
+  await quickConnect();
+
+  // Check if reconnection succeeded
+  const vpnState = store.get("vpn");
+  if (vpnState.connected) {
+    log.info(`Smart reconnect: SUCCESS on attempt ${reconnectAttempts}`);
+    reconnectAttempts = 0;
+    startHealthMonitoring(); // restart monitoring
+  } else {
+    log.warn(`Smart reconnect: attempt ${reconnectAttempts} failed — will retry`);
+    // smartReconnect will be called again by the health monitor (which we restart)
+    // OR we recurse if health monitor isn't running
+    if (!healthCheckTimer) {
+      await smartReconnect();
+    }
+  }
+}
 
 async function enableKillSwitch(): Promise<void> {
   if (killSwitchActive) return;

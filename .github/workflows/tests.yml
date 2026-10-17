@@ -23,6 +23,9 @@ jobs:
       - name: Run xray config validation tests (JSON structure)
         run: bun run src/lib/__tests__/xray-config.test.ts
 
+      - name: Run kill switch logic tests
+        run: bun run src/lib/__tests__/kill-switch-logic.test.ts
+
       - name: Download xray binary for validation
         run: |
           curl -fsSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
