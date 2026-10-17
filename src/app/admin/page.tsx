@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
-import { Shield, Users, Mail, Crown, Check, X, Trash2, Send, ExternalLink, AlertCircle } from "lucide-react";
+import { Shield, Users, Mail, Crown, Check, X, Trash2, Send, ExternalLink, AlertCircle, Lock } from "lucide-react";
 import { DistortLogo } from "@/components/vpn/distort-logo";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -38,12 +38,8 @@ type Message = {
 };
 
 export default function AdminPanel() {
-  const [adminEmail, setAdminEmail] = useState(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("distort_admin_email") || "";
-    }
-    return "";
-  });
+  const [adminEmail, setAdminEmail] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
   const [authed, setAuthed] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -53,59 +49,68 @@ export default function AdminPanel() {
   const [replyText, setReplyText] = useState("");
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
 
-  // NOTE: checkAdmin, loadUsers, loadMessages, etc. are defined below
-  // and referenced by the useEffect. This is safe in JS because function
-  // declarations are hoisted, but eslint flags it. We use a ref to avoid
-  // the warning.
-  const checkAdminRef = useRef<() => void>(() => {});
-
+  // Check if already logged in (session cookie sent automatically by browser)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
-    if (adminEmail && !authed) {
-      checkAdminRef.current();
-    }
-  }, [adminEmail, authed]);
+    checkExistingSession();
+  }, []);
 
-  const checkAdmin = async () => {
-    if (!adminEmail) return;
+  const checkExistingSession = async () => {
     try {
-      // Check if admin — uses public /api/vip/check (no API key needed for check)
-      const res = await fetch(`/api/vip/check?email=${encodeURIComponent(adminEmail)}`);
-      const data = await res.json();
-      if (data.isAdmin) {
-        localStorage.setItem("distort_admin_email", adminEmail);
+      const res = await fetch("/api/admin/users");
+      if (res.ok) {
+        const data = await res.json();
         setAuthed(true);
-        toast.success("Admin access confirmed");
+        setAdminEmail(data.requestedBy || "admin");
+        setUsers(data.users || []);
+        loadMessages();
+      }
+    } catch {
+      // Not logged in — show login form
+    }
+  };
+
+  const login = async () => {
+    if (!adminEmail || !adminPassword) {
+      toast.error("Email and password are required");
+      return;
+    }
+    try {
+      const res = await fetch("/api/admin/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: adminEmail, password: adminPassword }),
+      });
+      const data = await res.json();
+      if (data.ok) {
+        setAuthed(true);
+        setAdminPassword(""); // clear password from memory
+        toast.success("Login successful", { description: `Welcome, ${data.email}` });
         loadUsers();
         loadMessages();
       } else {
-        toast.error("Not an admin", { description: "This email does not have admin privileges." });
+        toast.error(data.error || "Login failed");
       }
     } catch {
-      toast.error("Check failed");
+      toast.error("Login failed");
     }
   };
 
-  // eslint-disable-next-line react-hooks/rules-of-hooks
-  useEffect(() => {
-    checkAdminRef.current = checkAdmin;
-  });
-
-  // Helper: make authenticated fetch with admin headers
-  const adminFetch = async (url: string, options: RequestInit = {}) => {
-    const apiKey = typeof window !== "undefined" ? localStorage.getItem("distort_api_key") || "" : "";
-    return fetch(url, {
-      ...options,
-      headers: {
-        ...options.headers,
-        "x-admin-email": adminEmail,
-        ...(apiKey ? { "x-api-key": apiKey } : {}),
-      },
-    });
+  const logout = async () => {
+    try {
+      await fetch("/api/admin/logout", { method: "POST" });
+    } catch {}
+    setAuthed(false);
+    setUsers([]);
+    setMessages([]);
+    setAdminEmail("");
+    toast.info("Logged out");
   };
 
+  // All admin API calls use cookies automatically (no manual headers needed)
   const loadUsers = async () => {
     try {
-      const res = await adminFetch(`/api/admin/users`);
+      const res = await fetch("/api/admin/users");
       const data = await res.json();
       if (data.error) { toast.error(data.error); return; }
       setUsers(data.users || []);
@@ -114,7 +119,7 @@ export default function AdminPanel() {
 
   const loadMessages = async () => {
     try {
-      const res = await adminFetch(`/api/admin/messages`);
+      const res = await fetch("/api/admin/messages");
       const data = await res.json();
       if (data.error) { toast.error(data.error); return; }
       setMessages(data.messages || []);
@@ -123,7 +128,7 @@ export default function AdminPanel() {
 
   const grantVIP = async (email: string, days: string) => {
     try {
-      const res = await adminFetch("/api/vip/grant", {
+      const res = await fetch("/api/vip/grant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, durationDays: days ? Number(days) : null }),
@@ -140,7 +145,7 @@ export default function AdminPanel() {
 
   const revokeVIP = async (email: string) => {
     try {
-      const res = await adminFetch("/api/vip/revoke", {
+      const res = await fetch("/api/vip/revoke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email }),
@@ -157,7 +162,7 @@ export default function AdminPanel() {
 
   const grantAdmin = async (email: string) => {
     try {
-      const res = await adminFetch("/api/admin/grant-admin", {
+      const res = await fetch("/api/admin/grant-admin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email }),
@@ -175,7 +180,7 @@ export default function AdminPanel() {
 
   const replyMessage = async (id: string) => {
     try {
-      const res = await adminFetch(`/api/admin/messages/${id}`, {
+      const res = await fetch(`/api/admin/messages/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reply: replyText }),
@@ -192,7 +197,7 @@ export default function AdminPanel() {
 
   const archiveMessage = async (id: string) => {
     try {
-      await adminFetch(`/api/admin/messages/${id}`, {
+      await fetch(`/api/admin/messages/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: "archived" }),
@@ -204,13 +209,13 @@ export default function AdminPanel() {
 
   const deleteMessage = async (id: string) => {
     try {
-      await adminFetch(`/api/admin/messages/${id}`, { method: "DELETE" });
+      await fetch(`/api/admin/messages/${id}`, { method: "DELETE" });
       toast.success("Deleted");
       loadMessages();
     } catch { toast.error("Delete failed"); }
   };
 
-  // Login screen
+  // Login screen — email + password (NOT just email)
   if (!authed) {
     return (
       <div className="min-h-screen flex items-center justify-center px-4">
@@ -221,7 +226,7 @@ export default function AdminPanel() {
               <DistortLogo size={64} />
             </div>
             <h1 className="font-display text-2xl font-extrabold text-center text-white mb-2">DISTORT Admin</h1>
-            <p className="text-center text-sm text-muted-foreground mb-6">Sign in with your admin credentials</p>
+            <p className="text-center text-sm text-muted-foreground mb-6">Secure login with password</p>
             <div className="space-y-3">
               <div className="space-y-1.5">
                 <Label className="text-xs font-tech uppercase tracking-wider text-muted-foreground">Admin Email</Label>
@@ -230,31 +235,27 @@ export default function AdminPanel() {
                   placeholder="admin@distort.app"
                   value={adminEmail}
                   onChange={(e) => setAdminEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && login()}
                   className="bg-white/[0.04] border-white/10"
                 />
               </div>
               <div className="space-y-1.5">
-                <Label className="text-xs font-tech uppercase tracking-wider text-muted-foreground">API Key</Label>
+                <Label className="text-xs font-tech uppercase tracking-wider text-muted-foreground">Password</Label>
                 <Input
                   type="password"
-                  placeholder="Enter your DISTORT_API_KEY"
-                  onChange={(e) => {
-                    const key = e.target.value;
-                    if (key) localStorage.setItem("distort_api_key", key);
-                    else localStorage.removeItem("distort_api_key");
-                  }}
-                  className="bg-white/[0.04] border-white/10 font-mono text-xs"
+                  placeholder="••••••••"
+                  value={adminPassword}
+                  onChange={(e) => setAdminPassword(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && login()}
+                  className="bg-white/[0.04] border-white/10"
                 />
-                <p className="text-[10px] text-muted-foreground/70">
-                  Required in production. Leave empty for local dev (no DISTORT_API_KEY set).
-                </p>
               </div>
-              <Button onClick={checkAdmin} className="w-full bg-brand-gradient text-[#02131a] hover:opacity-90 font-tech uppercase tracking-wider">
-                <Shield className="w-4 h-4 mr-2" /> Access Admin Panel
+              <Button onClick={login} className="w-full bg-brand-gradient text-[#02131a] hover:opacity-90 font-tech uppercase tracking-wider">
+                <Lock className="w-4 h-4 mr-2" /> Secure Login
               </Button>
             </div>
             <p className="text-[11px] text-muted-foreground/70 text-center mt-4">
-              Only approved admins can access this panel.
+              Session expires after 24 hours. Password required.
             </p>
           </CardContent>
         </Card>
@@ -277,8 +278,8 @@ export default function AdminPanel() {
             <p className="text-xs text-muted-foreground font-tech uppercase tracking-wider">Logged in as {adminEmail}</p>
           </div>
         </div>
-        <Button variant="outline" size="sm" onClick={() => setAuthed(false)} className="border-white/10 text-muted-foreground">
-          Logout
+        <Button variant="outline" size="sm" onClick={logout} className="border-white/10 text-muted-foreground">
+          <Lock className="w-3.5 h-3.5 mr-1" /> Logout
         </Button>
       </div>
 
