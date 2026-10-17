@@ -1,28 +1,20 @@
 // DISTORT — /api/admin/messages
-// GET: list all messages (filterable by type/status)
-// POST: create a new message (from contact form — public, no auth needed)
+// GET: list all messages (admin only — requires API key + admin email)
+// POST: create a new message (PUBLIC — no auth, this is the contact form)
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { checkAuth } from "@/lib/auth";
+import { checkAdminAuth, getAdminEmail } from "@/lib/admin-auth";
 
+// GET — admin only
 export async function GET(req: NextRequest) {
-  const authFail = checkAuth(req);
+  const authFail = await checkAdminAuth(req);
   if (authFail) return authFail;
 
   try {
     const url = new URL(req.url);
-    const adminEmail = url.searchParams.get("adminEmail");
     const typeFilter = url.searchParams.get("type");
     const statusFilter = url.searchParams.get("status");
-
-    if (!adminEmail) {
-      return NextResponse.json({ error: "adminEmail is required" }, { status: 400 });
-    }
-    const admin = await db.user.findFirst({ where: { email: adminEmail } });
-    if (!admin || !admin.isAdmin) {
-      return NextResponse.json({ error: "Not authorized — admin access required" }, { status: 403 });
-    }
 
     const where: any = {};
     if (typeFilter) where.type = typeFilter;
@@ -33,14 +25,19 @@ export async function GET(req: NextRequest) {
       orderBy: { createdAt: "desc" },
     });
 
-    return NextResponse.json({ messages, count: messages.length });
+    return NextResponse.json({
+      messages,
+      count: messages.length,
+      requestedBy: getAdminEmail(req),
+    });
   } catch (err) {
     console.error("[api/admin/messages] GET failed", err);
     return NextResponse.json({ error: "Failed to list messages" }, { status: 500 });
   }
 }
 
-// POST — public endpoint (no auth) for contact/collaboration form
+// POST — PUBLIC endpoint for contact form (no auth needed)
+// This is how users send messages to the admin panel
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
@@ -50,7 +47,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "name, email and message are required" }, { status: 400 });
     }
 
-    // Validate type
+    // Validate and sanitize input
     const validTypes = ["vip_request", "collaboration", "support", "bug_report"];
     const messageType = validTypes.includes(type) ? type : "support";
 
@@ -63,19 +60,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Rate limit exceeded. Max 5 messages per hour." }, { status: 429 });
     }
 
+    // Sanitize: limit message length
+    const sanitizedMessage = message.slice(0, 5000);
+    const sanitizedSubject = (subject || "(no subject)").slice(0, 200);
+    const sanitizedName = name.slice(0, 100);
+    const sanitizedEmail = email.slice(0, 200).toLowerCase();
+
     const msg = await db.adminMessage.create({
       data: {
         type: messageType,
-        name,
-        email,
-        subject: subject || "(no subject)",
-        message,
+        name: sanitizedName,
+        email: sanitizedEmail,
+        subject: sanitizedSubject,
+        message: sanitizedMessage,
       },
     });
 
     return NextResponse.json({ ok: true, id: msg.id }, { status: 201 });
   } catch (err) {
     console.error("[api/admin/messages] POST failed", err);
+    // Don't leak internal errors to public endpoint
     return NextResponse.json({ error: "Failed to send message" }, { status: 500 });
   }
 }

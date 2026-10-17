@@ -1,26 +1,28 @@
 // DISTORT — /api/admin/grant-admin
-// POST: { email, adminEmail } — grant admin privileges to a user
-// Only existing admins can grant admin to others
+// POST: { email } — grant admin privileges to a user
+// Requires: x-api-key header + x-admin-email header (must be admin in DB)
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { checkAuth } from "@/lib/auth";
+import { checkAdminAuth, getAdminEmail } from "@/lib/admin-auth";
 
 export async function POST(req: NextRequest) {
-  const authFail = checkAuth(req);
+  const authFail = await checkAdminAuth(req);
   if (authFail) return authFail;
 
   try {
     const body = await req.json();
-    const { email, adminEmail } = body;
+    const { email } = body;
+    const adminEmail = getAdminEmail(req);
 
-    if (!email || !adminEmail) {
-      return NextResponse.json({ error: "email and adminEmail are required" }, { status: 400 });
+    if (!email) {
+      return NextResponse.json({ error: "email is required" }, { status: 400 });
     }
 
+    // Get admin user
     const admin = await db.user.findFirst({ where: { email: adminEmail } });
     if (!admin || !admin.isAdmin) {
-      return NextResponse.json({ error: "Not authorized — admin access required" }, { status: 403 });
+      return NextResponse.json({ error: "Not authorized" }, { status: 403 });
     }
 
     // Find or create user

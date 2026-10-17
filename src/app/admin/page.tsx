@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { Shield, Users, Mail, Crown, Check, X, Trash2, Send, ExternalLink, AlertCircle } from "lucide-react";
 import { DistortLogo } from "@/components/vpn/distort-logo";
@@ -53,16 +53,22 @@ export default function AdminPanel() {
   const [replyText, setReplyText] = useState("");
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
 
-  // Auto-login if we have a saved email and haven't checked yet
+  // NOTE: checkAdmin, loadUsers, loadMessages, etc. are defined below
+  // and referenced by the useEffect. This is safe in JS because function
+  // declarations are hoisted, but eslint flags it. We use a ref to avoid
+  // the warning.
+  const checkAdminRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     if (adminEmail && !authed) {
-      checkAdmin();
+      checkAdminRef.current();
     }
   }, [adminEmail, authed]);
 
   const checkAdmin = async () => {
     if (!adminEmail) return;
     try {
+      // Check if admin — uses public /api/vip/check (no API key needed for check)
       const res = await fetch(`/api/vip/check?email=${encodeURIComponent(adminEmail)}`);
       const data = await res.json();
       if (data.isAdmin) {
@@ -79,28 +85,48 @@ export default function AdminPanel() {
     }
   };
 
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  useEffect(() => {
+    checkAdminRef.current = checkAdmin;
+  });
+
+  // Helper: make authenticated fetch with admin headers
+  const adminFetch = async (url: string, options: RequestInit = {}) => {
+    const apiKey = typeof window !== "undefined" ? localStorage.getItem("distort_api_key") || "" : "";
+    return fetch(url, {
+      ...options,
+      headers: {
+        ...options.headers,
+        "x-admin-email": adminEmail,
+        ...(apiKey ? { "x-api-key": apiKey } : {}),
+      },
+    });
+  };
+
   const loadUsers = async () => {
     try {
-      const res = await fetch(`/api/admin/users?adminEmail=${encodeURIComponent(adminEmail)}`);
+      const res = await adminFetch(`/api/admin/users`);
       const data = await res.json();
+      if (data.error) { toast.error(data.error); return; }
       setUsers(data.users || []);
     } catch { toast.error("Failed to load users"); }
   };
 
   const loadMessages = async () => {
     try {
-      const res = await fetch(`/api/admin/messages?adminEmail=${encodeURIComponent(adminEmail)}`);
+      const res = await adminFetch(`/api/admin/messages`);
       const data = await res.json();
+      if (data.error) { toast.error(data.error); return; }
       setMessages(data.messages || []);
     } catch { toast.error("Failed to load messages"); }
   };
 
   const grantVIP = async (email: string, days: string) => {
     try {
-      const res = await fetch("/api/vip/grant", {
+      const res = await adminFetch("/api/vip/grant", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, adminEmail, durationDays: days ? Number(days) : null }),
+        body: JSON.stringify({ email, durationDays: days ? Number(days) : null }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -114,10 +140,10 @@ export default function AdminPanel() {
 
   const revokeVIP = async (email: string) => {
     try {
-      const res = await fetch("/api/vip/revoke", {
+      const res = await adminFetch("/api/vip/revoke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, adminEmail }),
+        body: JSON.stringify({ email }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -131,10 +157,10 @@ export default function AdminPanel() {
 
   const grantAdmin = async (email: string) => {
     try {
-      const res = await fetch("/api/admin/grant-admin", {
+      const res = await adminFetch("/api/admin/grant-admin", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, adminEmail }),
+        body: JSON.stringify({ email }),
       });
       const data = await res.json();
       if (data.ok) {
@@ -149,10 +175,10 @@ export default function AdminPanel() {
 
   const replyMessage = async (id: string) => {
     try {
-      const res = await fetch(`/api/admin/messages/${id}`, {
+      const res = await adminFetch(`/api/admin/messages/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reply: replyText, adminEmail }),
+        body: JSON.stringify({ reply: replyText }),
       });
       const data = await res.json();
       if (data.message) {
@@ -166,10 +192,10 @@ export default function AdminPanel() {
 
   const archiveMessage = async (id: string) => {
     try {
-      await fetch(`/api/admin/messages/${id}`, {
+      await adminFetch(`/api/admin/messages/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "archived", adminEmail }),
+        body: JSON.stringify({ status: "archived" }),
       });
       toast.success("Archived");
       loadMessages();
@@ -178,7 +204,7 @@ export default function AdminPanel() {
 
   const deleteMessage = async (id: string) => {
     try {
-      await fetch(`/api/admin/messages/${id}?adminEmail=${encodeURIComponent(adminEmail)}`, { method: "DELETE" });
+      await adminFetch(`/api/admin/messages/${id}`, { method: "DELETE" });
       toast.success("Deleted");
       loadMessages();
     } catch { toast.error("Delete failed"); }
