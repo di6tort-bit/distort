@@ -4,11 +4,11 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { checkAdminAuth, getAdminEmail } from "@/lib/admin-auth";
+import { checkAdminSession, getAdminEmailFromSession } from "@/lib/admin-session";
 
 // GET — admin only
 export async function GET(req: NextRequest) {
-  const authFail = await checkAdminAuth(req);
+  const authFail = await checkAdminSession(req);
   if (authFail) return authFail;
 
   try {
@@ -28,7 +28,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       messages,
       count: messages.length,
-      requestedBy: getAdminEmail(req),
+      requestedBy: getAdminEmailFromSession(req),
     });
   } catch (err) {
     console.error("[api/admin/messages] GET failed", err);

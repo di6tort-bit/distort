@@ -5,10 +5,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { checkAdminAuth } from "@/lib/admin-auth";
+import { checkAdminSession } from "@/lib/admin-session";
 
 export async function POST(req: NextRequest) {
-  const authFail = await checkAdminAuth(req);
+  const authFail = await checkAdminSession(req);
   if (authFail) return authFail;
 
   try {

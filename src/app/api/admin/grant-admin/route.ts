@@ -4,16 +4,16 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { checkAdminAuth, getAdminEmail } from "@/lib/admin-auth";
+import { checkAdminSession, getAdminEmailFromSession } from "@/lib/admin-session";
 
 export async function POST(req: NextRequest) {
-  const authFail = await checkAdminAuth(req);
+  const authFail = await checkAdminSession(req);
   if (authFail) return authFail;
 
   try {
     const body = await req.json();
     const { email } = body;
-    const adminEmail = getAdminEmail(req);
+    const adminEmail = getAdminEmailFromSession(req);
 
     if (!email) {
       return NextResponse.json({ error: "email is required" }, { status: 400 });

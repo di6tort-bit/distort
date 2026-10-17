@@ -4,17 +4,17 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { checkAdminAuth, getAdminEmail } from "@/lib/admin-auth";
+import { checkAdminSession, getAdminEmailFromSession } from "@/lib/admin-session";
 
 export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const authFail = await checkAdminAuth(req);
+  const authFail = await checkAdminSession(req);
   if (authFail) return authFail;
 
   try {
     const { id } = await params;
     const body = await req.json();
     const { status, reply } = body;
-    const adminEmail = getAdminEmail(req);
+    const adminEmail = getAdminEmailFromSession(req);
 
     // Get admin user ID for handledBy
     const admin = await db.user.findFirst({ where: { email: adminEmail } });
@@ -43,7 +43,7 @@ export async function PATCH(req: NextRequest, { params }: { params: Promise<{ id
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
-  const authFail = await checkAdminAuth(req);
+  const authFail = await checkAdminSession(req);
   if (authFail) return authFail;
 
   try {

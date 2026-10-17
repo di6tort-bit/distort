@@ -162,20 +162,18 @@ model UserSetting {
 
 /// A registered Distort user (free account).
 model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  /// "free" = community configs, "vip" = premium servers + priority + best speed
-  tier      String   @default("free")
-  /// When VIP expires (null = never / admin-granted)
-  vipUntil  DateTime?
-  referral  String?
-  /// Admin-granted: bypass all limits, can grant VIP to others
-  isAdmin   Boolean  @default(false)
-  /// Who approved this admin (null = self-appointed founder)
-  approvedBy String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  tier         String   @default("free")
+  vipUntil     DateTime?
+  referral     String?
+  isAdmin      Boolean  @default(false)
+  approvedBy   String?
+  /// Password hash for admin login (null = no password set, can't log in)
+  passwordHash String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 /// Messages sent by users/visitors to the admin panel.
