@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
 import { Shield, Users, Mail, Crown, Check, X, Trash2, Send, ExternalLink, AlertCircle } from "lucide-react";
 import { DistortLogo } from "@/components/vpn/distort-logo";
@@ -38,7 +38,12 @@ type Message = {
 };
 
 export default function AdminPanel() {
-  const [adminEmail, setAdminEmail] = useState("");
+  const [adminEmail, setAdminEmail] = useState(() => {
+    if (typeof window !== "undefined") {
+      return localStorage.getItem("distort_admin_email") || "";
+    }
+    return "";
+  });
   const [authed, setAuthed] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -48,12 +53,20 @@ export default function AdminPanel() {
   const [replyText, setReplyText] = useState("");
   const [replyingTo, setReplyingTo] = useState<string | null>(null);
 
+  // Auto-login if we have a saved email and haven't checked yet
+  useEffect(() => {
+    if (adminEmail && !authed) {
+      checkAdmin();
+    }
+  }, [adminEmail, authed]);
+
   const checkAdmin = async () => {
     if (!adminEmail) return;
     try {
       const res = await fetch(`/api/vip/check?email=${encodeURIComponent(adminEmail)}`);
       const data = await res.json();
       if (data.isAdmin) {
+        localStorage.setItem("distort_admin_email", adminEmail);
         setAuthed(true);
         toast.success("Admin access confirmed");
         loadUsers();
