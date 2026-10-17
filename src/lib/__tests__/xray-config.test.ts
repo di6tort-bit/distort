@@ -153,7 +153,7 @@ for (const tc of TEST_CONFIGS) {
       if (stderr.includes("Configuration OK") || stderr.includes("started")) {
         assert(true, `${tc.name}: xray run -test passed`);
       } else {
-        assert(false, `${tc.name}: xray run -test passed`, stderr.substring(0, 300));
+        assert(false, `${tc.name}: xray run -test passed`, stderr.substring(0, 2000));
       }
     } finally {
       try { unlinkSync(tmpFile); } catch {}
