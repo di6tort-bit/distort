@@ -137,17 +137,51 @@ function createWindow(): void {
 
   const url = getLoadUrl();
   log.info(`Loading URL: ${url}`);
-  mainWindow?.loadURL(url).catch(() => {
-    log.warn("Failed to load main URL, falling back to offline page");
-    mainWindow?.loadURL(getOfflinePath());
+
+  // Listen for load failures + console errors
+  mainWindow?.webContents.on("did-fail-load", (_e, errorCode, errorDescription, validatedURL) => {
+    log.error(`did-fail-load: errorCode=${errorCode} desc=${errorDescription} url=${validatedURL}`);
+    // Retry after 3s if the Next.js server might still be starting up
+    if (errorCode !== -3) { // -3 is aborted (user navigated away) — don't retry
+      setTimeout(() => {
+        log.info(`Retrying load: ${url}`);
+        mainWindow?.loadURL(url).catch(() => {
+          log.warn("Retry failed — loading offline page");
+          mainWindow?.loadURL(getOfflinePath());
+        });
+      }, 3000);
+    }
   });
 
-  // After 10s, if still loading, show offline page
+  mainWindow?.webContents.on("console-message", (_e, level, message, line, sourceId) => {
+    log.info(`[renderer:${level}] ${message} (${sourceId}:${line})`);
+  });
+
+  mainWindow?.webContents.on("render-process-gone", (_e, details) => {
+    log.error(`Render process gone: ${JSON.stringify(details)}`);
+  });
+
+  mainWindow?.loadURL(url).catch((err) => {
+    log.warn(`Failed to load main URL: ${err?.message || err}`);
+    // Retry once after 5s — Next.js server might still be starting
+    setTimeout(() => {
+      log.info(`Retrying load after 5s: ${url}`);
+      mainWindow?.loadURL(url).catch(() => {
+        log.warn("Retry failed — loading offline page");
+        mainWindow?.loadURL(getOfflinePath());
+      });
+    }, 5000);
+  });
+
+  // After 30s, if still on offline page, reload the main URL one more time
   setTimeout(() => {
-    if (mainWindow && !mainWindow.webContents.getURL().startsWith("http")) {
-      mainWindow.loadURL(getOfflinePath());
+    if (mainWindow && !mainWindow.webContents.getURL().startsWith("http://localhost:38571")) {
+      log.info("30s elapsed and dashboard not loaded — retrying main URL");
+      mainWindow.loadURL(getLoadUrl()).catch(() => {
+        log.warn("Final retry failed — staying on offline page");
+      });
     }
-  }, 10000);
+  }, 30000);
 }
 
 // ---------------------------------------------------------------------------
@@ -2194,6 +2228,50 @@ function startNextServer(): Promise<void> {
     // server never actually starts — the window loads localhost:38571,
     // gets nothing, and shows the "VPN Engine Ready / RETRY CONNECTION"
     // offline page forever.
+    //
+    // DATABASE_URL: the Next.js server needs a SQLite database. We put it
+    // in the user's userData directory so it persists across app updates.
+    // The path must use file: prefix for Prisma to recognize it as SQLite.
+    const dbPath = path.join(app.getPath("userData"), "distort.db");
+    const dbDir = path.dirname(dbPath);
+    if (!fs.existsSync(dbDir)) {
+      try { fs.mkdirSync(dbDir, { recursive: true }); } catch {}
+    }
+    log.info(`Database path: ${dbPath}`);
+
+    // First run: create the database schema using Prisma's binary.
+    // Prisma generates a migration engine binary alongside the query engine.
+    // We use `prisma db push` to create all tables from schema.prisma.
+    if (!fs.existsSync(dbPath)) {
+      log.info("First run — creating database schema via prisma db push…");
+      try {
+        const prismaBin = path.join(standalonePath, "node_modules", "prisma", "build", "index.js");
+        // Fallback: look in the app's node_modules
+        const prismaBinAlt = path.join(app.getAppPath(), "node_modules", "prisma", "build", "index.js");
+        const prismaBinFinal = fs.existsSync(prismaBin) ? prismaBin : prismaBinAlt;
+
+        if (fs.existsSync(prismaBinFinal)) {
+          const { execFileSync } = require("child_process");
+          execFileSync(process.execPath, [prismaBinFinal, "db", "push", "--accept-data-loss"], {
+            cwd: standalonePath,
+            env: {
+              ...process.env,
+              ELECTRON_RUN_AS_NODE: "1",
+              DATABASE_URL: `file:${dbPath}`,
+            },
+            stdio: ["ignore", "pipe", "pipe"],
+            timeout: 30000,
+          });
+          log.info("Database schema created successfully");
+        } else {
+          log.warn("Prisma binary not found — database will be created on first query (may fail)");
+        }
+      } catch (e: any) {
+        log.error(`Failed to create database schema: ${e?.message}`);
+        // Non-fatal — the server might still work if it creates tables on-the-fly
+      }
+    }
+
     nextServer = spawnChild(process.execPath, [serverJs], {
       cwd: standalonePath,
       env: {
@@ -2205,6 +2283,10 @@ function startNextServer(): Promise<void> {
         // execute the Next.js standalone server.js (which requires Node's
         // http module, not Electron's GUI APIs).
         ELECTRON_RUN_AS_NODE: "1",
+        // Database: Prisma needs this to connect to SQLite
+        DATABASE_URL: `file:${dbPath}`,
+        // Session secret for admin auth
+        DISTORT_SESSION_SECRET: process.env.DISTORT_SESSION_SECRET || "distort-desktop-session-secret-local",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
