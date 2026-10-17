@@ -26,6 +26,9 @@ jobs:
       - name: Run kill switch logic tests
         run: bun run src/lib/__tests__/kill-switch-logic.test.ts
 
+      - name: Run Emergency Connectivity state machine, planner, policy, and diagnostics tests
+        run: bun test src/lib/__tests__/emergency-connectivity.test.ts
+
       - name: Download xray binary for validation
         run: |
           curl -fsSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
