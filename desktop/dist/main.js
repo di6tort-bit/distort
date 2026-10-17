@@ -528,19 +528,70 @@ async function stopVpnEngine() {
     });
     mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
 }
-// REAL kill switch on Windows: add a firewall rule that blocks all outbound
-// traffic except to the VPN server itself. This prevents IP leaks when the
-// tunnel drops unexpectedly.
-// NOTE: This requires administrator privileges. If the app doesn't have admin,
-// the rule will fail silently and we log a warning.
+// REAL kill switch on Windows.
+//
+// APPROACH: Route table manipulation (NOT Windows Firewall).
+//
+// Why not firewall? Windows Firewall has a known issue: Block rules can
+// override Allow rules depending on policy settings. This makes it
+// unreliable for a kill switch — the VPN server might get blocked too,
+// preventing reconnection.
+//
+// Instead, we manipulate the system's routing table:
+// 1. Remove the default route (so no traffic can leave)
+// 2. Add a specific route for the VPN server IP (so the tunnel can reconnect)
+//
+// This is more reliable because:
+// - Route table is processed in priority order (lowest metric wins)
+// - We add the VPN server route with a LOW metric (high priority)
+// - The default route is removed, so all other traffic fails
+// - No "Block vs Allow" priority conflict
+//
+// NOTE: This requires admin privileges. If the app doesn't have admin,
+// the kill switch won't work and we log a clear warning.
 let killSwitchActive = false;
+let savedDefaultGateway = "";
+let savedInterfaceIndex = 0;
 async function enableKillSwitch() {
     if (killSwitchActive)
         return;
     try {
-        electron_log_1.default.info("Kill switch: blocking all outbound traffic via Windows Firewall…");
+        electron_log_1.default.info("Kill switch: enabling via route table manipulation…");
         const { exec } = require("child_process");
-        // Get the VPN server IP so we can EXCLUDE it from the block rule.
+        if (process.platform !== "win32") {
+            electron_log_1.default.warn("Kill switch: route table manipulation only implemented for Windows");
+            return;
+        }
+        // Step 1: Get the current default gateway and interface
+        const gatewayInfo = await new Promise((resolve) => {
+            exec("route print 0.0.0.0", (err, stdout) => {
+                if (err) {
+                    electron_log_1.default.warn(`Kill switch: could not get route table: ${err.message}`);
+                    resolve({ gateway: "", iface: 0 });
+                    return;
+                }
+                // Parse the output to find the default gateway
+                // Look for "0.0.0.0  0.0.0.0  <gateway>  <interface>"
+                const lines = stdout.split("\n");
+                for (const line of lines) {
+                    const match = line.match(/0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+)/);
+                    if (match) {
+                        resolve({ gateway: match[1], iface: parseInt(match[2]) });
+                        return;
+                    }
+                }
+                resolve({ gateway: "", iface: 0 });
+            });
+        });
+        savedDefaultGateway = gatewayInfo.gateway;
+        savedInterfaceIndex = gatewayInfo.iface;
+        if (!savedDefaultGateway) {
+            electron_log_1.default.warn("Kill switch: could not find default gateway — kill switch may not work");
+        }
+        else {
+            electron_log_1.default.info(`Kill switch: default gateway = ${savedDefaultGateway} (iface ${savedInterfaceIndex})`);
+        }
+        // Step 2: Get the VPN server IP
         const vpnServer = store.get("vpn.server");
         const vpnHost = vpnServer?.host || "";
         let vpnIp = "";
@@ -550,63 +601,52 @@ async function enableKillSwitch() {
                 const addresses = await dnsPromises.lookup(vpnHost, { all: true });
                 if (Array.isArray(addresses) && addresses.length > 0) {
                     vpnIp = addresses[0].address;
-                    electron_log_1.default.info(`Kill switch: VPN server ${vpnHost} resolves to ${vpnIp} — will be excluded from block`);
                 }
             }
             catch (e) {
                 electron_log_1.default.warn(`Kill switch: could not resolve VPN server IP: ${e.message}`);
             }
         }
-        // CRITICAL FIX: On Windows Firewall, Block rules have HIGHER priority than Allow rules
-        // when they have the same scope. To properly exclude the VPN server, we must use
-        // a block rule with a SCOPE that excludes the VPN server IP.
-        // Approach: Create a block rule for all IPs EXCEPT the VPN server.
-        // netsh doesn't support "block all except X" directly, so we use:
-        //   1. Block rule for 0.0.0.0-<vpn_ip_minus_1> and <vpn_ip_plus_1>-255.255.255.255
-        //   2. This is complex, so instead we use a simpler approach:
-        //      - Block ALL outbound
-        //      - Add an Allow rule with HIGHER priority (lower rule index) for the VPN IP
-        //   Windows Firewall processes rules in order, and the FIRST matching rule wins.
-        //   So we add the Allow rule FIRST, then the Block rule.
-        // Step 1: Add Allow rule for VPN server (must be added BEFORE the block rule)
-        if (vpnIp) {
+        // Step 3: Add a specific route for the VPN server (high priority)
+        if (vpnIp && savedDefaultGateway && savedInterfaceIndex > 0) {
             await new Promise((resolve) => {
-                exec(`netsh advfirewall firewall add rule name="DISTORT-KillSwitch-AllowVPN" dir=out action=allow remoteip=${vpnIp} enable=yes`, (err) => {
+                exec(`route add ${vpnIp} mask 255.255.255.255 ${savedDefaultGateway} metric 1 IF ${savedInterfaceIndex}`, (err) => {
                     if (err) {
-                        electron_log_1.default.warn(`Kill switch: could not add VPN allow rule: ${err.message}`);
+                        electron_log_1.default.warn(`Kill switch: could not add VPN server route: ${err.message}`);
                     }
                     else {
-                        electron_log_1.default.info(`Kill switch: VPN server ${vpnIp} allow rule added (higher priority)`);
+                        electron_log_1.default.info(`Kill switch: VPN server ${vpnIp} route added (metric 1)`);
                     }
                     resolve();
                 });
             });
         }
-        // Step 2: Add Block rule for ALL outbound traffic
-        // This rule will NOT match the VPN server because the Allow rule was added first
-        // and Windows processes rules in order (first match wins).
-        await new Promise((resolve) => {
-            exec('netsh advfirewall firewall add rule name="DISTORT-KillSwitch-Block" dir=out action=block enable=yes', (err) => {
-                if (err) {
-                    electron_log_1.default.warn(`Kill switch: netsh block command failed (need admin?): ${err.message}`);
+        // Step 4: Remove the default route (blocks all other traffic)
+        if (savedDefaultGateway && savedInterfaceIndex > 0) {
+            await new Promise((resolve) => {
+                exec(`route delete 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} IF ${savedInterfaceIndex}`, (err) => {
+                    if (err) {
+                        electron_log_1.default.warn(`Kill switch: could not remove default route: ${err.message}`);
+                    }
+                    else {
+                        electron_log_1.default.info("Kill switch: default route removed — all traffic blocked except VPN server");
+                        killSwitchActive = true;
+                        mainWindow?.webContents.send("vpn:kill-switch-activated");
+                    }
                     resolve();
-                    return;
-                }
-                electron_log_1.default.info("Kill switch: outbound traffic blocked (VPN server excluded)");
-                killSwitchActive = true;
-                mainWindow?.webContents.send("vpn:kill-switch-activated");
-                resolve();
+                });
             });
-        });
-        // Step 3: VERIFY the rules actually exist (don't just trust exit code)
+        }
+        // Step 5: VERIFY the default route is actually gone
         await new Promise((resolve) => {
-            exec('netsh advfirewall firewall show rule name="DISTORT-KillSwitch-Block"', (err, stdout) => {
-                if (err || !stdout.includes("DISTORT-KillSwitch-Block")) {
-                    electron_log_1.default.error("Kill switch: VERIFICATION FAILED — block rule not found after creation!");
-                    killSwitchActive = false;
+            exec("route print 0.0.0.0", (err, stdout) => {
+                if (err || !stdout.includes("0.0.0.0")) {
+                    electron_log_1.default.info("Kill switch: VERIFIED — default route is removed");
+                    killSwitchActive = true;
                 }
                 else {
-                    electron_log_1.default.info("Kill switch: VERIFIED — block rule is active");
+                    electron_log_1.default.error("Kill switch: VERIFICATION FAILED — default route still exists!");
+                    killSwitchActive = false;
                 }
                 resolve();
             });
@@ -620,18 +660,41 @@ async function disableKillSwitch() {
     if (!killSwitchActive)
         return;
     try {
-        electron_log_1.default.info("Kill switch: removing firewall block rules…");
+        electron_log_1.default.info("Kill switch: restoring default route…");
         const { exec } = require("child_process");
-        // Remove BOTH the block rule and the VPN allow rule
-        await new Promise((resolve) => {
-            exec('netsh advfirewall firewall delete rule name="DISTORT-KillSwitch-Block"', () => {
-                exec('netsh advfirewall firewall delete rule name="DISTORT-KillSwitch-AllowVPN"', () => {
-                    killSwitchActive = false;
-                    electron_log_1.default.info("Kill switch: traffic restored (both rules removed)");
+        // Restore the default route
+        if (savedDefaultGateway && savedInterfaceIndex > 0) {
+            await new Promise((resolve) => {
+                exec(`route add 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} metric 25 IF ${savedInterfaceIndex}`, (err) => {
+                    if (err) {
+                        electron_log_1.default.error(`Kill switch: FAILED to restore default route: ${err.message}`);
+                        electron_log_1.default.error("Kill switch: YOUR INTERNET MAY BE BLOCKED — run this manually:");
+                        electron_log_1.default.error(`  route add 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} metric 25`);
+                    }
+                    else {
+                        electron_log_1.default.info("Kill switch: default route restored — internet is back");
+                        killSwitchActive = false;
+                    }
                     resolve();
                 });
             });
-        });
+        }
+        // Remove the VPN server specific route
+        const vpnServer = store.get("vpn.server");
+        const vpnHost = vpnServer?.host || "";
+        if (vpnHost && savedDefaultGateway) {
+            try {
+                const dnsPromises = require("dns").promises;
+                const addresses = await dnsPromises.lookup(vpnHost, { all: true });
+                if (addresses.length > 0) {
+                    const vpnIp = addresses[0].address;
+                    await new Promise((resolve) => {
+                        exec(`route delete ${vpnIp}`, () => resolve());
+                    });
+                }
+            }
+            catch { }
+        }
     }
     catch (e) {
         electron_log_1.default.warn(`Kill switch disable error: ${e?.message}`);
