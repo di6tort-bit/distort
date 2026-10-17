@@ -96,24 +96,85 @@ class DistortVpnService : VpnService() {
         //    For protocols that don't support native TUN, we fall back to SOCKS5 routing.
         startPacketPump()
 
-        // 4. Wait briefly to confirm xray started successfully
+        // 4. REAL connection verification — don't just check if xray is alive.
+        //    Do an actual HTTP request THROUGH the SOCKS proxy (127.0.0.1:10808)
+        //    to verify traffic can flow through the tunnel.
         Thread {
             try {
-                Thread.sleep(2000)
-                if (xrayProcess?.isAlive == true && isRunning.get()) {
-                    // xray is running — mark as connected
-                    showNotification("Connected · ${host}")
-                    Log.i(TAG, "VPN connected successfully")
-                } else {
+                showNotification("Verifying tunnel…")
+                // Give xray time to fully start up and establish the outbound connection
+                Thread.sleep(1500)
+
+                if (xrayProcess?.isAlive != true || !isRunning.get()) {
                     val exitCode = try { xrayProcess?.exitValue() ?: -1 } catch (e: Exception) { -1 }
                     Log.e(TAG, "xray failed to start, exit=$exitCode")
                     showNotification("Connection failed")
                     stopVpn()
+                    return@Thread
+                }
+
+                // Verify traffic actually flows through the SOCKS proxy
+                val verified = verifyTrafficThroughProxy()
+                if (verified) {
+                    showNotification("Connected · ${host}")
+                    Log.i(TAG, "VPN connected successfully — traffic verified through proxy")
+                } else {
+                    Log.e(TAG, "xray is alive but traffic verification failed — NOT marking as connected")
+                    showNotification("Tunnel started but verification failed")
+                    // Keep the notification but don't claim connected — user should see the issue
+                    // Don't auto-stop; let the user see the logs and decide
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Startup check failed", e)
             }
         }.start()
+    }
+
+    /**
+     * REAL traffic verification: do an HTTP request through xray's SOCKS5 proxy
+     * (127.0.0.1:10808). If the request succeeds, we know:
+     *   1. xray is running and accepting SOCKS connections
+     *   2. The outbound to the VPN server is working
+     *   3. Traffic can actually flow through the tunnel
+     *
+     * This is more honest than just checking if the xray process is alive.
+     */
+    private fun verifyTrafficThroughProxy(): Boolean {
+        return try {
+            val proxy = java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", 10808))
+            val url = java.net.URL("https://www.cloudflare.com/cdn-cgi/trace")
+            val conn = url.openConnection(proxy) as java.net.HttpURLConnection
+            conn.connectTimeout = 8000
+            conn.readTimeout = 8000
+            conn.requestMethod = "GET"
+            val code = conn.responseCode
+            Log.i(TAG, "Traffic verification: HTTP $code through SOCKS proxy")
+            if (code in 200..299) {
+                // Read the response to confirm it's real
+                val body = conn.inputStream.bufferedReader().readText()
+                // cloudflare/cdn-cgi/trace returns text like "ip=x.x.x.x\n..."
+                Log.i(TAG, "Traffic verification: received ${body.length} bytes — tunnel is working")
+                true
+            } else {
+                Log.w(TAG, "Traffic verification: got HTTP $code — may be blocked")
+                // Even a non-200 means the proxy is routing traffic
+                true
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Traffic verification failed: ${e.message}")
+            // Check if xray's SOCKS port is even listening
+            try {
+                val socket = java.net.Socket()
+                socket.connect(java.net.InetSocketAddress("127.0.0.1", 10808), 2000)
+                socket.close()
+                Log.w(TAG, "SOCKS port is open but HTTP request failed — server may be unreachable")
+                // Port is open but can't route — likely the outbound server is down
+                false
+            } catch (e2: Exception) {
+                Log.e(TAG, "SOCKS port not reachable — xray not fully started: ${e2.message}")
+                false
+            }
+        }
     }
 
     private fun startxrayCore(host: String, port: Int, protocol: String, configUri: String?, tunFd: Int) {

@@ -723,12 +723,43 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", async (e) => {
+  // Always clean up: stop xray, disable kill switch, even if quitting due to crash.
   if (store.get("vpn.connected")) {
     e.preventDefault();
     await stopVpnEngine();
     isQuitting = true;
+  }
+  // CRITICAL: Always disable kill switch on quit, otherwise the user's internet
+  // would be permanently blocked if the app crashed while kill switch was active.
+  await disableKillSwitch();
+  if (!isQuitting) {
+    isQuitting = true;
     app.quit();
   }
+});
+
+// On SIGINT/SIGTERM (e.g., system shutdown), clean up before exiting.
+process.on("SIGINT", async () => {
+  log.info("Received SIGINT — cleaning up…");
+  await stopVpnEngine();
+  await disableKillSwitch();
+  process.exit(0);
+});
+process.on("SIGTERM", async () => {
+  log.info("Received SIGTERM — cleaning up…");
+  await stopVpnEngine();
+  await disableKillSwitch();
+  process.exit(0);
+});
+
+// On uncaught exceptions (potential crash), try to clean up before exiting.
+process.on("uncaughtException", async (err) => {
+  log.error("Uncaught exception — cleaning up before exit:", err);
+  try {
+    await stopVpnEngine();
+    await disableKillSwitch();
+  } catch {}
+  process.exit(1);
 });
 
 // ---------------------------------------------------------------------------

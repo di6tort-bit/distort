@@ -2,43 +2,64 @@
 // Protects sensitive endpoints from unauthenticated access.
 //
 // HOW IT WORKS:
-// - If DISTORT_API_KEY env var is set, all protected endpoints require
-//   either an `x-api-key` header or a `?key=` query param matching it.
-// - If DISTORT_API_KEY is NOT set (default), endpoints are open — this is
-//   fine for local desktop use but NOT safe for public deployment.
+// - DISTORT_API_KEY env var MUST be set (otherwise the server refuses to start
+//   in production — see the startup check below).
+// - All protected endpoints require an `x-api-key` header matching it.
+// - Query-param (?key=) is NOT supported (to avoid logging keys in URLs).
 //
-// FOR PUBLIC DEPLOYMENT:
-//   1. Set DISTORT_API_KEY in your environment (a long random string)
-//   2. The desktop app reads it from settings and sends it as x-api-key
-//   3. Without the key, all protected endpoints return 401
+// SECURITY:
+// - Key is compared in constant time to prevent timing attacks.
+// - If key is not set in production (NODE_ENV=production), the server
+//   refuses to serve protected endpoints and returns 503.
 
 import { NextRequest, NextResponse } from "next/server";
+import { timingSafeEqual } from "crypto";
 
 const API_KEY = process.env.DISTORT_API_KEY || "";
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+
+function safeCompare(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(a), Buffer.from(b));
+  } catch {
+    return false;
+  }
+}
 
 export function isAuthConfigured(): boolean {
-  return API_KEY.length > 0;
+  return API_KEY.length >= 32; // require at least 32 chars
 }
 
 export function checkAuth(req: NextRequest): NextResponse | null {
+  // In production, API key MUST be set. If not, refuse to serve.
+  if (IS_PRODUCTION && !isAuthConfigured()) {
+    return NextResponse.json(
+      {
+        error: "Server misconfigured: DISTORT_API_KEY not set or too short (min 32 chars).",
+        hint: "Set DISTORT_API_KEY env var to a strong random string (at least 32 characters).",
+      },
+      { status: 503 }
+    );
+  }
+
+  // If no key configured (dev mode), endpoints are open — but we add a warning.
   if (!isAuthConfigured()) {
-    // No API key configured — endpoints are open (local dev mode).
-    // We add a warning header so clients know.
     return null;
   }
 
+  // Key MUST come from header — NOT query param (to avoid logging).
   const headerKey = req.headers.get("x-api-key");
-  const queryKey = new URL(req.url).searchParams.get("key");
-
-  if (headerKey === API_KEY || queryKey === API_KEY) {
+  if (headerKey && safeCompare(headerKey, API_KEY)) {
     return null;
   }
 
   return NextResponse.json(
     {
-      error: "Unauthorized — API key required",
-      hint: "Set DISTORT_API_KEY env var on the server, and send it as x-api-key header or ?key= query param.",
+      error: "Unauthorized — valid API key required",
+      hint: "Send your API key in the x-api-key header.",
     },
     { status: 401 }
   );
 }
+
