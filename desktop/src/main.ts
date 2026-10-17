@@ -2241,70 +2241,68 @@ function startNextServer(): Promise<void> {
     log.info(`Database path: ${dbPath}`);
 
     // First run: create the database schema + seed data.
-    // Uses better-sqlite3 (native, synchronous) to execute the SQL schema
-    // file that's bundled with the app. This is more reliable than trying
-    // to run `prisma db push` (which requires the full Prisma CLI binary
-    // that's NOT bundled in the standalone build).
+    // Uses sql.js (pure JavaScript, WASM-based) to avoid native module
+    // compilation issues on CI. The schema + seed SQL files are bundled
+    // with the app in resources/db/.
+    const initAndStartServer = () => {
+      nextServer = spawnChild(process.execPath, [serverJs], {
+        cwd: standalonePath,
+        env: {
+          ...process.env,
+          PORT: "38571",
+          NODE_ENV: "production",
+          HOSTNAME: "127.0.0.1",
+          ELECTRON_RUN_AS_NODE: "1",
+          DATABASE_URL: `file:${dbPath}`,
+          DISTORT_SESSION_SECRET: process.env.DISTORT_SESSION_SECRET || "distort-desktop-session-secret-local",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+
+      nextServer.stdout?.on("data", (data) => {
+        log.info(`[next] ${data.toString().trim()}`);
+      });
+      nextServer.stderr?.on("data", (data) => {
+        log.error(`[next] ${data.toString().trim()}`);
+      });
+
+      // Wait for server to be ready
+      let attempts = 0;
+      const checkInterval = setInterval(() => {
+        attempts++;
+        fetch("http://127.0.0.1:38571/")
+          .then((r) => {
+            if (r.ok) {
+              clearInterval(checkInterval);
+              log.info("Next.js standalone server is ready on port 38571");
+              resolve();
+            }
+          })
+          .catch(() => {
+            if (attempts > 20) {
+              clearInterval(checkInterval);
+              log.warn("Next.js server didn't start in time");
+              resolve();
+            }
+          });
+      }, 500);
+    };
+
     if (!fs.existsSync(dbPath)) {
       log.info("First run — initializing database schema + seed data…");
-      try {
-        initDatabase(dbPath);
-        log.info("Database initialized successfully");
-      } catch (e: any) {
-        log.error(`Database initialization failed: ${e?.message}`);
-        // Non-fatal — the Next.js server might still start, but DB queries will fail.
-        // The user will see a clear error in the logs.
-      }
+      initDatabase(dbPath)
+        .then(() => {
+          log.info("Database initialized successfully");
+          initAndStartServer();
+        })
+        .catch((e: any) => {
+          log.error(`Database initialization failed: ${e?.message}`);
+          initAndStartServer(); // Start server anyway — it may still work
+        });
     } else {
       log.info("Database already exists — skipping initialization");
+      initAndStartServer();
     }
-
-    nextServer = spawnChild(process.execPath, [serverJs], {
-      cwd: standalonePath,
-      env: {
-        ...process.env,
-        PORT: "38571",
-        NODE_ENV: "production",
-        HOSTNAME: "127.0.0.1",
-        // CRITICAL: run the Electron binary as pure Node.js so it can
-        // execute the Next.js standalone server.js (which requires Node's
-        // http module, not Electron's GUI APIs).
-        ELECTRON_RUN_AS_NODE: "1",
-        // Database: Prisma needs this to connect to SQLite
-        DATABASE_URL: `file:${dbPath}`,
-        // Session secret for admin auth
-        DISTORT_SESSION_SECRET: process.env.DISTORT_SESSION_SECRET || "distort-desktop-session-secret-local",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    nextServer.stdout?.on("data", (data) => {
-      log.info(`[next] ${data.toString().trim()}`);
-    });
-    nextServer.stderr?.on("data", (data) => {
-      log.error(`[next] ${data.toString().trim()}`);
-    });
-
-    // Wait for server to be ready
-    let attempts = 0;
-    const checkInterval = setInterval(() => {
-      attempts++;
-      fetch("http://127.0.0.1:38571/")
-        .then((r) => {
-          if (r.ok) {
-            clearInterval(checkInterval);
-            log.info("Next.js standalone server is ready on port 38571");
-            resolve();
-          }
-        })
-        .catch(() => {
-          if (attempts > 20) {
-            clearInterval(checkInterval);
-            log.warn("Next.js server didn't start in time");
-            resolve(); // resolve anyway, will use offline fallback
-          }
-        });
-    }, 500);
   });
 }
 

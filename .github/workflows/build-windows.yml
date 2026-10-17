@@ -19,18 +19,9 @@ jobs:
         run: bun run build
         env:
           DATABASE_URL: "file:/tmp/distort.db"
-      - name: Install desktop deps (skip native build scripts)
+      - name: Install desktop deps
         working-directory: desktop
-        run: bun install --ignore-scripts
-      - name: Setup MSBuild (for native module compilation)
-        uses: microsoft/setup-msbuild@v2
-      - name: Setup Visual Studio (for node-gyp)
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      - name: Rebuild native modules for Electron
-        working-directory: desktop
-        run: bunx electron-rebuild -f -w better-sqlite3
+        run: bun install
       - name: Generate icons
         working-directory: desktop
         run: bun run build-icons.mjs

@@ -32,12 +32,7 @@
       "dist/**/*",
       "resources/**/*",
       "package.json",
-      "node_modules/better-sqlite3/**/*",
-      "node_modules/bindings/**/*",
-      "node_modules/file-uri-to-path/**/*"
-    ],
-    "asarUnpack": [
-      "node_modules/better-sqlite3/**/*"
+      "node_modules/sql.js/**/*"
     ],
     "extraResources": [
       {
@@ -123,11 +118,11 @@
     }
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3",
     "electron-log": "^5.2.0",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.8.9",
-    "node-fetch": "^3.3.2"
+    "node-fetch": "^3.3.2",
+    "sql.js": "^1.15.0"
   },
   "devDependencies": {
     "electron": "^33.0.0",
