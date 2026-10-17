@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Power, Server as ServerIcon, Gauge, BarChart3, Settings as Cog, User, X, ChevronLeft, Shield, Globe2 } from "lucide-react";
+import { Power, Server as ServerIcon, Gauge, BarChart3, Settings as Cog, User, X, ChevronLeft, Shield, Globe2, AlertTriangle } from "lucide-react";
 import { DistortWordmark } from "./distort-logo";
 import { ConnectView } from "./connect-view";
 import { ServerListView } from "./server-list-view";
@@ -11,15 +11,17 @@ import { SettingsView } from "./settings-view";
 import { SpeedTestView } from "./speed-test-view";
 import { AccountView } from "./account-view";
 import { CommunityMeshView } from "./community-mesh-view";
+import { EmergencyConnectivityView } from "./emergency-connectivity-view";
 import { useVpnStore } from "@/lib/vpn-store";
 import { Button } from "@/components/ui/button";
 
-type View = "connect" | "servers" | "mesh" | "speedtest" | "stats" | "settings" | "account";
+type View = "connect" | "servers" | "mesh" | "emergency" | "speedtest" | "stats" | "settings" | "account";
 
 const NAV: Array<{ id: View; label: string; icon: ReactNode; tag?: string }> = [
   { id: "connect", label: "Connect", icon: <Power className="w-4 h-4" /> },
   { id: "servers", label: "Servers", icon: <ServerIcon className="w-4 h-4" /> },
   { id: "mesh", label: "Community Mesh", icon: <Globe2 className="w-4 h-4" />, tag: "Iran" },
+  { id: "emergency", label: "Emergency", icon: <AlertTriangle className="w-4 h-4" />, tag: "Beta" },
   { id: "speedtest", label: "Speed Test", icon: <Gauge className="w-4 h-4" /> },
   { id: "stats", label: "Statistics", icon: <BarChart3 className="w-4 h-4" /> },
   { id: "settings", label: "Settings", icon: <Cog className="w-4 h-4" /> },
@@ -99,6 +101,7 @@ export function Dashboard({ onClose }: { onClose: () => void }) {
                 {view === "connect" && "One tap to freedom"}
                 {view === "servers" && "30+ nodes · stealth-ready"}
                 {view === "mesh" && "Community configs · Iran-optimized"}
+                {view === "emergency" && "Honest recovery · client-probed"}
                 {view === "speedtest" && "Measure real throughput"}
                 {view === "stats" && "Your privacy, in numbers"}
                 {view === "settings" && "Tune your tunnel"}
@@ -122,6 +125,7 @@ export function Dashboard({ onClose }: { onClose: () => void }) {
               {view === "connect" && <ConnectView onPickServer={() => setView("servers")} />}
               {view === "servers" && <ServerListView onConnected={() => setView("connect")} />}
               {view === "mesh" && <CommunityMeshView />}
+              {view === "emergency" && <EmergencyConnectivityView />}
               {view === "speedtest" && <SpeedTestView />}
               {view === "stats" && <StatsView />}
               {view === "settings" && <SettingsView />}

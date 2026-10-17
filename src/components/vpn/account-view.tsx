@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { motion } from "framer-motion";
-import { Download, Copy, Check, Chrome, Monitor, Smartphone, Shield, Gift, Users, Sparkles, FileCode2, KeyRound, Heart, ExternalLink } from "lucide-react";
+import { Download, Copy, Check, Chrome, Monitor, Smartphone, Shield, Gift, Users, Sparkles, FileCode2, KeyRound, Heart, ExternalLink, AlertTriangle, Zap } from "lucide-react";
 import { useFetch, postJSON } from "@/hooks/use-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -21,7 +21,23 @@ type Account = {
   createdAt: string;
 };
 
-type GenResult = { filename: string; mime: string; content: string };
+// Config response shape from /api/servers/[id]/config.
+// The connectable/source/warning fields were added in task 2-D — older
+// responses may not carry them, so we treat them as optional and fall
+// back to the safe assumption that any legacy response is a non-connectable
+// template (because the route only ever emits templates).
+type GenResult = {
+  filename: string;
+  mime: string;
+  content: string;
+  // New (task 2-D) — missing from legacy responses:
+  connectable?: boolean;
+  source?: "template" | "provisioned" | "imported";
+  warning?: string | null;
+  label?: string;
+  protocol?: string;
+  country?: string;
+};
 
 export function AccountView() {
   const { data: servers } = useFetch<{ servers: ServerLite[] }>("/api/servers");
@@ -47,12 +63,28 @@ export function AccountView() {
     try {
       const r = await postJSON<GenResult>(`/api/servers/${sid}/config`, { protocol });
       setGenerated(r);
-      toast.success("Config generated", { description: r.filename });
+      // Always remind the user this is a TEMPLATE (the route never returns a
+      // real, connectable config — provisioning is a separate path). The
+      // success toast wording is intentionally cautious so the user doesn't
+      // mistake the generated text for a working config in an emergency.
+      toast.success("Template config generated", {
+        description: `${r.filename} — NOT CONNECTABLE (sample credentials)`,
+      });
     } catch (e) {
       toast.error("Failed to generate config", { description: (e as Error).message });
     } finally {
       setGenerating(false);
     }
+  };
+
+  // Stub call to the (not-yet-built) provisioning path. Once the real
+  // provisioning infrastructure is wired up, this button can be flipped to
+  // invoke provisionConfig() from @/lib/config-generator directly.
+  const requestProvisionedConfig = () => {
+    toast.error("Provisioning is not yet available", {
+      description:
+        "Use the Community Mesh tab to import real configs from the Iran subscription, or paste your own config URI.",
+    });
   };
 
   const copy = () => {
@@ -121,14 +153,16 @@ export function AccountView() {
         </CardContent>
       </Card>
 
-      {/* Config generator */}
+      {/* Config generator (TEMPLATE / preview only) */}
       <Card className="glass border-white/5">
         <CardHeader className="pb-3">
           <CardTitle className="font-display tracking-wider text-sm flex items-center gap-2">
             <KeyRound className="w-4 h-4 text-[#00f0ff]" /> Manual Config Generator
+            <Badge variant="outline" className="border-[#ffb020]/40 text-[#ffb020] font-tech uppercase text-[9px] ml-1">Template only</Badge>
           </CardTitle>
           <p className="text-xs text-muted-foreground mt-1">
-            Generate ready-to-use configs for your own client (WireGuard, V2Ray, Trojan, Shadowsocks, SSH).
+            Generate a <span className="text-[#ffb020]">template / preview</span> config to inspect the structure for each protocol
+            (WireGuard, V2Ray, Trojan, Shadowsocks, SSH). Configs use sample credentials and will not connect.
           </p>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -163,8 +197,23 @@ export function AccountView() {
           </div>
 
           <Button onClick={generate} disabled={generating} className="w-full bg-brand-gradient text-[#02131a] hover:opacity-90 font-tech uppercase tracking-wider">
-            <FileCode2 className="w-4 h-4 mr-2" /> {generating ? "Generating…" : "Generate Config"}
+            <FileCode2 className="w-4 h-4 mr-2" /> {generating ? "Generating…" : "Generate Template Config"}
           </Button>
+
+          {/* Persistent honesty banner — the manual generator only ever
+              produces TEMPLATE configs (sample credentials, not connectable).
+              Surfacing this BEFORE the user clicks Generate prevents the
+              emergency-scenario trap where a user mistakes a template for a
+              working connection. */}
+          <div className="flex items-start gap-2 rounded-lg border border-[#ffb020]/30 bg-[#ffb020]/5 px-3 py-2">
+            <AlertTriangle className="w-4 h-4 text-[#ffb020] shrink-0 mt-0.5" />
+            <p className="text-xs text-[#ffb020]/90 leading-relaxed">
+              <span className="font-tech uppercase tracking-wider">Template / preview only —</span>{" "}
+              configs generated here use <span className="font-semibold">sample credentials</span> and
+              <span className="font-semibold"> cannot connect</span>. For a real connection, use the
+              Community Mesh tab or your own server.
+            </p>
+          </div>
 
           {generated && (
             <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="rounded-xl border border-[#00f0ff]/30 bg-[#050814]/80 overflow-hidden">
@@ -181,11 +230,31 @@ export function AccountView() {
                   </Button>
                 </div>
               </div>
+              {/* Per-config NOT CONNECTABLE badge — re-stated here so the
+                  user sees it right next to the config text, in case they
+                  scrolled past the banner above. */}
+              <div className="flex items-center gap-2 px-3 py-2 border-b border-white/5 bg-[#ff4d6d]/5">
+                <AlertTriangle className="w-3.5 h-3.5 text-[#ff4d6d] shrink-0" />
+                <span className="text-[11px] font-tech uppercase tracking-wider text-[#ff4d6d]">
+                  NOT CONNECTABLE — sample credentials
+                </span>
+              </div>
               <pre className="max-h-72 overflow-auto p-3 text-[11px] font-mono text-muted-foreground leading-relaxed">
 {generated.content}
               </pre>
             </motion.div>
           )}
+
+          {/* Provisioned-config CTA — separate path from the template
+              generator above. Clicking it surfaces the (stub) provisioning
+              unavailability so the user is redirected to Community Mesh. */}
+          <Button
+            variant="outline"
+            onClick={requestProvisionedConfig}
+            className="w-full border-[#8b5cf6]/40 text-[#a78bfa] hover:bg-[#8b5cf6]/10 font-tech uppercase tracking-wider"
+          >
+            <Zap className="w-4 h-4 mr-2" /> Get a real provisioned config
+          </Button>
         </CardContent>
       </Card>
 

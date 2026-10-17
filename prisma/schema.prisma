@@ -195,3 +195,61 @@ model AdminMessage {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+/// A probe result from the Emergency Connectivity engine.
+/// Records the three independent states (structural / reachability / tunnel)
+/// for a given ImportedConfig, without storing any credentials.
+model ProbeResult {
+  id             String   @id @default(cuid())
+  /// The config that was probed (null if probed by raw URI not in DB)
+  configId       String?
+  /// The plan this probe belongs to
+  planId         String?
+  /// Structural validity: "valid" | "invalid-syntax" | "missing-fields" | "unsupported-protocol"
+  structural     String
+  /// Server reachability: "reachable" | "unreachable" | "not-probed"
+  reachability   String   @default("not-probed")
+  /// Tunnel verification: "verified" | "traffic-failed" | "leak-detected" | "not-attempted"
+  tunnel         String   @default("not-attempted")
+  /// Latency in ms (null if not probed)
+  latencyMs      Int?
+  /// Exit IP discovered through the tunnel (null if not verified)
+  /// NOTE: This is the EXIT IP, not the user's real IP. Safe to store.
+  exitIp         String?
+  exitCountry    String?
+  /// Free-form failure reason (NO credentials, NO sensitive URLs)
+  failureReason  String?
+  probedAt       DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  @@index([configId])
+  @@index([planId])
+  @@index([probedAt])
+}
+
+/// A recovery attempt from the Emergency Connectivity engine.
+/// Each attempt = one try of one candidate.
+model RecoveryAttempt {
+  id             String   @id @default(cuid())
+  /// The plan this attempt belongs to
+  planId         String
+  /// Which candidate was tried (config id or "satellite-stub-vip" etc.)
+  candidateId    String
+  /// Candidate label (for display without joining back to ImportedConfig)
+  candidateLabel String
+  /// Index of this attempt (1-based)
+  attemptNumber  Int
+  /// State machine state when this attempt was made
+  state          String
+  /// Result: "success" | "failure" | "skipped" | "in-progress"
+  result         String
+  /// Free-form reason (NO credentials, NO sensitive URLs)
+  reason         String   @default("")
+  /// Latency observed, if any
+  latencyMs      Int?
+  startedAt      DateTime @default(now())
+  endedAt        DateTime?
+
+  @@index([planId])
+  @@index([startedAt])
+}
