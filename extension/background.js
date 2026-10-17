@@ -207,9 +207,14 @@ async function handleConnect(message) {
   }
 
   // All checks passed — mark as connected
+  // NOTE: 'connected' here means 'proxy is set AND verification passed'.
+  // This does NOT mean the selected protocol (WireGuard/V2Ray/etc.) is running —
+  // the extension only sets a SOCKS5 proxy. For real VPN protocols, use the
+  // desktop app. This is explicitly documented in the state as 'proxyVerified'.
   await setState({
     connected: true,
     connecting: false,
+    proxyVerified: true,  // distinct from 'connected' — means HTTP test passed
     serverId: server.id,
     protocol: protocol || 'wireguard',
     stealth: !!stealth,
@@ -221,7 +226,7 @@ async function handleConnect(message) {
     error: null,
   });
   await updateBadge(true);
-  await notify('Distort connected', `${server.country} · ${server.city} (${(protocol || 'wireguard').toUpperCase()})`);
+  await notify('Distort connected', `${server.country} · ${server.city} (SOCKS5 proxy verified)`);
 }
 
 async function handleDisconnect() {

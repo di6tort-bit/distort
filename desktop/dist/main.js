@@ -316,127 +316,93 @@ async function startVpnEngine(server, protocol, configUri) {
     // (Previously, xray logging "started" would immediately mark connected —
     //  but that only means the inbound is ready, not that the outbound works.)
     // REAL HTTP verification: do an actual GET request through xray's SOCKS5 proxy.
-    // This proves: (1) xray is running, (2) SOCKS inbound works, (3) the outbound
-    // to the VPN server works, (4) traffic actually flows to a real destination.
+    // This is the ONLY way to verify the tunnel works — NOT just checking if the
+    // SOCKS port is open (that only proves xray's inbound is ready, not outbound).
     //
-    // We fetch https://www.cloudflare.com/cdn-cgi/trace which returns the exit IP.
-    // If we get a valid response, the tunnel is verified working.
+    // We do a full SOCKS5 handshake + TLS + HTTP GET to cloudflare/cdn-cgi/trace.
+    // If we get a valid response containing "ip=", the tunnel is verified working.
+    // If ANY step fails → return false (NOT connected). No fallbacks.
     async function verifyHttpThroughProxy() {
+        let socksSocket = null;
+        let tlsSocket = null;
         try {
-            // Use the SocksProxyAgent pattern: create a SOCKS5 connection to 127.0.0.1:10808,
-            // then do an HTTP CONNECT through it.
-            // Node.js 20+ has built-in support via undici, but for simplicity we
-            // use a manual TCP socket check + assume HTTP works if SOCKS accepts.
-            //
-            // For a TRUE HTTP verification, we'd need socks-proxy-agent package.
-            // Since we can't add deps mid-build, we do a 2-step check:
-            //   1. SOCKS port accepts connections (xray inbound ready)
-            //   2. Try to fetch through the proxy (proves outbound works)
             const net = require("net");
-            // Step 1: Check SOCKS port
-            const socksOk = await new Promise((resolve) => {
-                const socket = new net.Socket();
-                const t = setTimeout(() => { socket.destroy(); resolve(false); }, 3000);
-                socket.setTimeout(3000);
-                socket.once("connect", () => {
-                    clearTimeout(t);
-                    socket.destroy();
-                    resolve(true);
-                });
-                socket.once("error", (err) => {
-                    clearTimeout(t);
-                    electron_log_1.default.warn(`SOCKS port check failed: ${err?.message}`);
-                    resolve(false);
-                });
-                socket.connect(10808, "127.0.0.1");
+            const { connect: tlsConnect } = await Promise.resolve().then(() => __importStar(require("tls")));
+            // Create a SOCKS5 connection to xray's local proxy
+            socksSocket = new net.Socket();
+            await new Promise((resolve, reject) => {
+                const t = setTimeout(() => reject(new Error("SOCKS connect timeout")), 5000);
+                socksSocket.connect(10808, "127.0.0.1", () => { clearTimeout(t); resolve(); });
+                socksSocket.on("error", (err) => { clearTimeout(t); reject(err); });
             });
-            if (!socksOk) {
-                electron_log_1.default.warn("Traffic verification: SOCKS port not reachable");
-                return false;
+            // SOCKS5 greeting: version 5, 1 auth method, no auth
+            socksSocket.write(Buffer.from([0x05, 0x01, 0x00]));
+            await new Promise((resolve, reject) => {
+                const t = setTimeout(() => reject(new Error("SOCKS greeting timeout")), 5000);
+                socksSocket.once("data", () => { clearTimeout(t); resolve(); });
+            });
+            // SOCKS5 CONNECT request to www.cloudflare.com:443
+            const targetHost = "www.cloudflare.com";
+            const hostBytes = Buffer.from(targetHost);
+            const connectReq = Buffer.concat([
+                Buffer.from([0x05, 0x01, 0x00, 0x03]),
+                Buffer.from([hostBytes.length]),
+                hostBytes,
+                Buffer.from([0x01, 0xbb]), // port 443
+            ]);
+            socksSocket.write(connectReq);
+            await new Promise((resolve, reject) => {
+                const t = setTimeout(() => reject(new Error("SOCKS CONNECT timeout")), 8000);
+                socksSocket.once("data", (data) => {
+                    clearTimeout(t);
+                    if (data[1] === 0x00) {
+                        resolve(); // connected through SOCKS
+                    }
+                    else {
+                        reject(new Error(`SOCKS CONNECT failed: code ${data[1]}`));
+                    }
+                });
+            });
+            // Wrap in TLS
+            tlsSocket = tlsConnect({ socket: socksSocket, servername: targetHost });
+            await new Promise((resolve, reject) => {
+                const t = setTimeout(() => reject(new Error("TLS handshake timeout")), 8000);
+                tlsSocket.once("secureConnect", () => { clearTimeout(t); resolve(); });
+                tlsSocket.once("error", (err) => { clearTimeout(t); reject(err); });
+            });
+            // Send HTTP request
+            tlsSocket.write("GET /cdn-cgi/trace HTTP/1.1\r\nHost: www.cloudflare.com\r\nConnection: close\r\n\r\n");
+            const response = await new Promise((resolve, reject) => {
+                let data = "";
+                const t = setTimeout(() => resolve(data), 8000);
+                tlsSocket.on("data", (chunk) => { data += chunk.toString(); });
+                tlsSocket.on("end", () => { clearTimeout(t); resolve(data); });
+                tlsSocket.on("error", (err) => { clearTimeout(t); reject(err); });
+            });
+            // Validate response — must contain "ip=" to prove traffic flowed
+            if (response.includes("ip=")) {
+                electron_log_1.default.info("Traffic verification: REAL HTTP response received through SOCKS proxy — tunnel verified");
+                return true;
             }
-            electron_log_1.default.info("Traffic verification: SOCKS port reachable");
-            // Step 2: Try a real HTTP request through the SOCKS proxy.
-            // We use fetch() with a custom dispatcher if available, otherwise
-            // fall back to the SOCKS port check only.
-            try {
-                // Attempt to use the global fetch with SOCKS — this may not work
-                // without socks-proxy-agent, but we try a direct TCP CONNECT.
-                // If it fails, we still have the SOCKS port check above.
-                const { connect: tlsConnect } = await Promise.resolve().then(() => __importStar(require("tls")));
-                // Create a SOCKS5 handshake manually
-                const socksSocket = new net.Socket();
-                await new Promise((resolve, reject) => {
-                    socksSocket.connect(10808, "127.0.0.1", resolve);
-                    socksSocket.on("error", reject);
-                });
-                // SOCKS5 greeting: version 5, 1 auth method, no auth
-                socksSocket.write(Buffer.from([0x05, 0x01, 0x00]));
-                await new Promise((resolve) => {
-                    socksSocket.once("data", () => resolve());
-                });
-                // Resolve cloudflare.com IP (we'll connect to 104.16.0.0 range)
-                // For simplicity, use www.cloudflare.com's known IP
-                const targetHost = "www.cloudflare.com";
-                const targetPort = 443;
-                // SOCKS5 CONNECT request
-                const hostBytes = Buffer.from(targetHost);
-                const connectReq = Buffer.concat([
-                    Buffer.from([0x05, 0x01, 0x00, 0x03]), // ver, connect, rsv, domain
-                    Buffer.from([hostBytes.length]),
-                    hostBytes,
-                    Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff]),
-                ]);
-                socksSocket.write(connectReq);
-                await new Promise((resolve, reject) => {
-                    const timeout = setTimeout(() => reject(new Error("SOCKS connect timeout")), 8000);
-                    socksSocket.once("data", (data) => {
-                        clearTimeout(timeout);
-                        if (data[1] === 0x00) {
-                            resolve(); // connected
-                        }
-                        else {
-                            reject(new Error(`SOCKS connect failed: ${data[1]}`));
-                        }
-                    });
-                });
-                // Wrap in TLS
-                const tlsSocket = tlsConnect({
-                    socket: socksSocket,
-                    servername: targetHost,
-                });
-                await new Promise((resolve, reject) => {
-                    tlsSocket.once("secureConnect", resolve);
-                    tlsSocket.once("error", reject);
-                });
-                // Send HTTP request
-                tlsSocket.write("GET /cdn-cgi/trace HTTP/1.1\r\nHost: www.cloudflare.com\r\nConnection: close\r\n\r\n");
-                const response = await new Promise((resolve, reject) => {
-                    let data = "";
-                    tlsSocket.on("data", (chunk) => { data += chunk.toString(); });
-                    tlsSocket.on("end", () => resolve(data));
-                    tlsSocket.on("error", reject);
-                    setTimeout(() => resolve(data), 5000); // timeout
-                });
-                tlsSocket.destroy();
-                socksSocket.destroy();
-                if (response.includes("ip=")) {
-                    electron_log_1.default.info("Traffic verification: got valid response through SOCKS proxy — tunnel verified");
-                    return true;
-                }
-                else {
-                    electron_log_1.default.warn("Traffic verification: SOCKS connected but no valid HTTP response");
-                    return false;
-                }
-            }
-            catch (httpErr) {
-                electron_log_1.default.warn(`Traffic verification: HTTP through SOCKS failed: ${httpErr?.message}`);
-                // SOCKS port is open but HTTP failed — server may be unreachable
+            else {
+                electron_log_1.default.warn("Traffic verification: SOCKS connected but no valid HTTP response — NOT connected");
                 return false;
             }
         }
         catch (e) {
-            electron_log_1.default.warn(`Traffic verification error: ${e?.message}`);
+            electron_log_1.default.warn(`Traffic verification FAILED: ${e?.message} — NOT connected`);
             return false;
+        }
+        finally {
+            // Always clean up sockets
+            try {
+                tlsSocket?.destroy();
+            }
+            catch { }
+            try {
+                socksSocket?.destroy();
+            }
+            catch { }
         }
     }
     vpnProcess.stdout?.on("data", (data) => {
@@ -552,6 +518,7 @@ async function stopVpnEngine() {
 let killSwitchActive = false;
 let savedDefaultGateway = "";
 let savedInterfaceIndex = 0;
+let savedDefaultMetric = 25; // default if we can't read it
 async function enableKillSwitch() {
     if (killSwitchActive)
         return;
@@ -565,37 +532,36 @@ async function enableKillSwitch() {
         // Step 1: Get ALL active IPv4 routes using PowerShell (more reliable than route print)
         // We need: default gateway, interface index, and interface metric
         const routeInfo = await new Promise((resolve) => {
-            // PowerShell gives us structured output
-            exec('powershell -Command "Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1 -Property NextHop,InterfaceIndex,InterfaceAlias | Format-List"', (err, stdout) => {
+            // PowerShell gives us structured output including metric
+            exec('powershell -Command "Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1 -Property NextHop,InterfaceIndex,InterfaceMetric | Format-List"', (err, stdout) => {
                 if (err) {
                     electron_log_1.default.warn(`Kill switch: PowerShell Get-NetRoute failed: ${err.message}, trying route print`);
-                    // Fallback to route print with better parsing
                     exec("route print -4 0.0.0.0", (err2, stdout2) => {
                         if (err2) {
-                            resolve({ gateway: "", iface: "", ifaceIp: "" });
+                            resolve({ gateway: "", iface: "", ifaceIp: "", metric: 25 });
                             return;
                         }
                         parseRoutePrintOutput(stdout2, resolve);
                     });
                     return;
                 }
-                // Parse PowerShell output: "NextHop : 192.168.1.1\nInterfaceIndex : 12\nInterfaceAlias : Ethernet"
                 const gateway = stdout.match(/NextHop\s*:\s*(\d+\.\d+\.\d+\.\d+)/)?.[1] || "";
                 const iface = stdout.match(/InterfaceIndex\s*:\s*(\d+)/)?.[1] || "";
-                // Get interface IP
+                const metric = parseInt(stdout.match(/InterfaceMetric\s*:\s*(\d+)/)?.[1] || "25");
                 if (iface) {
                     exec(`powershell -Command "(Get-NetIPAddress -InterfaceIndex ${iface} -AddressFamily IPv4).IPAddress"`, (e3, ipOut) => {
                         const ifaceIp = ipOut?.trim() || "";
-                        resolve({ gateway, iface, ifaceIp });
+                        resolve({ gateway, iface, ifaceIp, metric });
                     });
                 }
                 else {
-                    resolve({ gateway, iface, ifaceIp: "" });
+                    resolve({ gateway, iface, ifaceIp: "", metric });
                 }
             });
         });
         savedDefaultGateway = routeInfo.gateway;
         savedInterfaceIndex = parseInt(routeInfo.iface) || 0;
+        savedDefaultMetric = routeInfo.metric || 25;
         if (!savedDefaultGateway || savedInterfaceIndex === 0) {
             electron_log_1.default.error("Kill switch: could not find default route — kill switch ABORTED (would not work)");
             return;
@@ -607,9 +573,10 @@ async function enableKillSwitch() {
             gateway: savedDefaultGateway,
             interfaceIndex: savedInterfaceIndex,
             interfaceIp: routeInfo.ifaceIp,
+            metric: savedDefaultMetric,
             timestamp: Date.now(),
         }));
-        electron_log_1.default.info(`Kill switch: route info saved to ${routeBackupFile} for crash recovery`);
+        electron_log_1.default.info(`Kill switch: route info saved (gateway=${savedDefaultGateway}, iface=${savedInterfaceIndex}, metric=${savedDefaultMetric})`);
         // Step 2: Get the VPN server IP
         // CRITICAL: If we can't resolve the VPN server IP, we MUST NOT remove
         // the default route — otherwise the tunnel can't reconnect and the user
@@ -703,19 +670,17 @@ function parseRoutePrintOutput(stdout, resolve) {
         // 0.0.0.0    0.0.0.0       192.168.1.1   192.168.1.5   25
         const match = line.match(/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+)/);
         if (match) {
-            // match[1] = gateway, match[2] = interface IP, match[3] = metric
-            // We need the interface INDEX, not IP — use the interface IP to find it
             const gateway = match[1];
             const ifaceIp = match[2];
-            // Find interface index from IP
+            const metric = parseInt(match[3]) || 25;
             const { exec } = require("child_process");
             exec(`powershell -Command "(Get-NetIPAddress -IPAddress ${ifaceIp}).InterfaceIndex"`, (e, out) => {
-                resolve({ gateway, iface: out?.trim() || "0", ifaceIp });
+                resolve({ gateway, iface: out?.trim() || "0", ifaceIp, metric });
             });
             return;
         }
     }
-    resolve({ gateway: "", iface: "", ifaceIp: "" });
+    resolve({ gateway: "", iface: "", ifaceIp: "", metric: 25 });
 }
 async function disableKillSwitch() {
     if (!killSwitchActive)
@@ -726,11 +691,11 @@ async function disableKillSwitch() {
         // Restore the default route
         if (savedDefaultGateway && savedInterfaceIndex > 0) {
             await new Promise((resolve) => {
-                exec(`route add 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} metric 25 IF ${savedInterfaceIndex}`, (err) => {
+                exec(`route add 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} metric ${savedDefaultMetric} IF ${savedInterfaceIndex}`, (err) => {
                     if (err) {
                         electron_log_1.default.error(`Kill switch: FAILED to restore default route: ${err.message}`);
                         electron_log_1.default.error("Kill switch: YOUR INTERNET MAY BE BLOCKED — run this manually:");
-                        electron_log_1.default.error(`  route add 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} metric 25 IF ${savedInterfaceIndex}`);
+                        electron_log_1.default.error(`  route add 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} metric ${savedDefaultMetric} IF ${savedInterfaceIndex}`);
                     }
                     else {
                         electron_log_1.default.info("Kill switch: default route restored — internet is back");
@@ -935,10 +900,10 @@ electron_1.app.whenReady().then(async () => {
             electron_log_1.default.warn(`Crash recovery: restoring default route to ${backup.gateway} on interface ${backup.interfaceIndex}…`);
             const { exec } = require("child_process");
             if (backup.gateway && backup.interfaceIndex) {
-                exec(`route add 0.0.0.0 mask 0.0.0.0 ${backup.gateway} metric 25 IF ${backup.interfaceIndex}`, (err) => {
+                exec(`route add 0.0.0.0 mask 0.0.0.0 ${backup.gateway} metric ${backup.metric || 25} IF ${backup.interfaceIndex}`, (err) => {
                     if (err) {
                         electron_log_1.default.error(`Crash recovery: FAILED to restore route: ${err.message}`);
-                        electron_log_1.default.error(`Crash recovery: Run manually: route add 0.0.0.0 mask 0.0.0.0 ${backup.gateway} metric 25 IF ${backup.interfaceIndex}`);
+                        electron_log_1.default.error(`Crash recovery: Run manually: route add 0.0.0.0 mask 0.0.0.0 ${backup.gateway} metric ${backup.metric || 25} IF ${backup.interfaceIndex}`);
                         // DO NOT delete the backup file — keep it so the user can retry
                         // or we can try again on next launch.
                     }

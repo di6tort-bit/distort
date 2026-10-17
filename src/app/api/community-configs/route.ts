@@ -1,11 +1,17 @@
 // DISTORT — /api/community-configs
 // GET : list all CommunityConfig rows.
 // POST: { protocol, uri, country?, note? } -> create a row.
+//
+// PROTECTED: These configs may contain UUIDs/passwords. Requires authentication
+// if DISTORT_API_KEY env var is set.
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { checkAuth } from "@/lib/auth";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const authFail = checkAuth(req);
+  if (authFail) return authFail;
   try {
     const configs = await db.communityConfig.findMany({
       orderBy: { createdAt: "desc" },
@@ -21,6 +27,8 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const authFail = checkAuth(req);
+  if (authFail) return authFail;
   try {
     const body = await req.json().catch(() => ({}));
     const protocol = String(body?.protocol || "");
