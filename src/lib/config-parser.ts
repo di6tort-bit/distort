@@ -276,10 +276,17 @@ export function parseSubscription(text: string): ParsedConfig[] {
     const parsed = parseConfigUri(line);
     if (parsed) out.push(parsed);
   }
-  // de-dup by host+port+protocol
+  // De-duplicate the same URI while preserving distinct routes to the
+  // same endpoint. Host+port+protocol is not a safe identity: a server can
+  // expose different credentials, transports, paths, SNI values, or security
+  // settings on the same socket.
+  //
+  // Strip the display label (fragment) so copies with different labels collapse,
+  // but keep all connection-defining URI content.
   const seen = new Set<string>();
   return out.filter((c) => {
-    const k = `${c.protocol}:${c.host}:${c.port}`;
+    const identity = c.raw.trim().replace(/#.*$/, "");
+    const k = identity || `${c.protocol}:${c.host}:${c.port}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;

@@ -149,6 +149,31 @@ const dupText = [vmessValid, vmessValid, vmessValid].join("\n");
 const deduped = parseSubscription(dupText);
 assert(deduped.length === 1, `Subscription deduplicates (${deduped.length} after dedup)`);
 
+// Different routes can share a host/port/protocol while using different
+// credentials, transports, paths, SNI values, or TLS/Reality settings.
+// They must remain separate candidates for failover.
+const sameEndpointDifferentRoutes = [
+  "vless://11111111-1111-4111-8111-111111111111@same.example.com:443?security=tls&type=ws&host=cdn.example.com&path=%2Falpha#route-a",
+  "vless://22222222-2222-4222-8222-222222222222@same.example.com:443?security=reality&pbk=example-public-key&fp=chrome&type=tcp&sni=www.example.com#route-b",
+].join("\n");
+const distinctRoutes = parseSubscription(sameEndpointDifferentRoutes);
+assert(
+  distinctRoutes.length === 2,
+  `Subscription preserves distinct routes on same endpoint (${distinctRoutes.length} found)`
+);
+
+// The display fragment is not connection data, so exact routes with different
+// labels should still de-duplicate.
+const sameRouteDifferentLabels = [
+  "vless://11111111-1111-4111-8111-111111111111@same.example.com:443?security=tls&type=ws#label-a",
+  "vless://11111111-1111-4111-8111-111111111111@same.example.com:443?security=tls&type=ws#label-b",
+].join("\n");
+const labelDeduped = parseSubscription(sameRouteDifferentLabels);
+assert(
+  labelDeduped.length === 1,
+  `Subscription deduplicates same route with different labels (${labelDeduped.length} after dedup)`
+);
+
 // ============================================================================
 // OPTIMIZED SCORING
 // ============================================================================
