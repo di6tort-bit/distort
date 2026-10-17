@@ -833,3 +833,65 @@ Stage Summary:
 - The companion API server reuses the same global vpnProcess variable as the desktop UI's startVpnEngine/stopVpnEngine — so the API and the UI can't double-spawn xray. If the user clicks "Quick Connect" in the desktop UI while the API is running a tunnel, startVpnEngine kills the existing xray first (existing behavior). The /api/tunnel/stop handler mirrors that: SIGTERM → 500ms wait → SIGKILL → null out vpnProcess.
 - Security posture: bound to 127.0.0.1 only (no remote access, no auth needed because localhost-only is the auth), configUri never logged (scrubConfigUri + log statements explicitly say "configUri REDACTED"), POST bodies capped at 1MB, /tunnel/start has 10s overall timeout, /tunnel/verify has 15s overall timeout, OPTIONS preflight handled for CORS, EADDRINUSE gives a clear "another Distort Desktop instance may be running" message.
 - Honest limitation: the inline verifyHttpThroughProxy() in startVpnEngine is preserved as a thin wrapper around the new top-level verifyTunnelTraffic() so existing health-monitoring (verifyHttpThroughProxyRef) continues to work unchanged. Behavior of the desktop UI's own quick-connect flow is unchanged — the 5-second startup-delay-then-verify pattern still runs.
+
+---
+Task ID: REVIEW-FIXES
+Agent: main (orchestrator)
+Task: Fix all 6 critical issues from user's thorough review
+
+Work Log:
+- Audited each of the 6 issues against the actual code — all confirmed.
+- Phase 1 (CRITICAL — configUri leak):
+  - planner.ts: configUri is now '' (empty) in plan response — never included
+  - NEW: POST /api/emergency/candidates/[id]/uri endpoint (rate-limited 20/min, POST not GET, checkAuth() in prod)
+  - recovery-engine.ts: fetchCandidateUri() fetches on-demand per candidate right before connecting
+  - SECURITY TEST: /api/emergency/plan returns configUri='' (PASS), secure endpoint returns URI on-demand (PASS)
+- Phase 2-A (BLOCKER — desktop companion API):
+  - desktop/src/main.ts: built REAL control API server on port 10810 (NOT 10809)
+  - 5 endpoints: /api/health, /api/tunnel/start|stop|status|verify
+  - Bound to 127.0.0.1, CORS for localhost:3000, configUri scrubbed from logs
+  - recovery-engine.ts: all 4 fetch URLs updated 10809 → 10810
+  - HONEST LIMIT: compiles but not runtime-tested (Electron needs display)
+- Phase 2-B (BLOCKER — Android bridge):
+  - NEW: RecoveryBridge.kt (@JavascriptInterface as window.DistortNative)
+  - NEW: DashboardWebViewActivity.kt (hosts dashboard, injects bridge on trusted origins)
+  - DistortVpnService.kt: VerificationResult expanded + 4 callback sites wired
+  - MainActivity.kt: added "OPEN WEB DASHBOARD" button (additive)
+  - recovery-engine.ts: AndroidNativeEngine class + createTunnelEngine() 3-tier priority
+  - HONEST LIMIT: Kotlin not compiled in sandbox (no Android SDK); build failed initially due to `internal` modifier on ConnectResult — FIXED (made public)
+- Phase 3 (network diagnosis false positives):
+  - client-diagnostics.ts: removed broken '>50ms = reachable' logic
+  - NEW: 3-state probe result (ok/timeout/unknown) instead of boolean
+  - NEW: 'unknown' BaseNetworkStatus when all probes ambiguous
+  - quickHealthCheck(): returns {online, unknown, latencyMs} — 'unknown' does NOT trigger recovery
+- Phase 4 (SSRF incomplete):
+  - ssrf-guard.ts: NEW resolvesToPrivateIp() — DNS resolution check (rebinding protection)
+  - NEW: checkSsrfSafe() — string check + DNS resolution check
+  - NEW: isPrivateIp() for IP-literal checks
+  - Added cloud metadata endpoints (169.254.169.254, metadata.google.internal, metadata.azure.com)
+  - validate endpoint: uses checkSsrfSafe() instead of isPrivateHost() alone
+- Phase 5 (CI — Emergency Engine tests on main):
+  - .github/workflows/tests.yml: renamed + 3 new test steps added
+  - "Run Emergency Connectivity engine tests" (89 tests)
+  - "Run SSRF guard tests" (9 inline tests)
+  - "Run client-diagnostics state machine tests"
+
+- CI verification (commit 5e7f015):
+  - ✅ Tests — Config Parser + Xray Validation + Emergency Engine: SUCCESS
+  - ✅ Build DISTORT Android APK: SUCCESS (after ConnectResult fix)
+  - ✅ Build DISTORT Windows .exe: SUCCESS
+
+Stage Summary:
+- All 6 user-identified issues addressed:
+  1. CRITICAL configUri leak → FIXED (empty in plan, on-demand secure endpoint)
+  2. BLOCKER desktop companion → FIXED (real API on port 10810, not runtime-tested)
+  3. BLOCKER Android bridge → FIXED (RecoveryBridge.kt + AndroidNativeEngine, not runtime-tested)
+  4. IMPORTANT remote fetch auth → FIXED (uses /api/emergency/plan + candidates/[id]/uri, not /api/imported-configs)
+  5. NEEDS FIX diagnosis false positives → FIXED (3-state probe, 'unknown' status)
+  6. NEEDS TEST SSRF → FIXED (DNS resolution check + cloud metadata blocking)
+- CI now includes Emergency Engine tests on main branch (was missing before).
+- HONEST LIMITATIONS (not claimed as "done"):
+  - Desktop companion API: compiles clean but NOT runtime-tested (Electron needs display)
+  - Android bridge: Kotlin compiles in CI but NOT runtime-tested on device
+  - Field testing on real devices: NOT done — requires APK install + real VPN config + network failure scenarios
+  - These limitations are explicitly documented in the worklog per the user's acceptance criteria.
