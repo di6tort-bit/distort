@@ -2168,7 +2168,20 @@ function startNextServer(): Promise<void> {
       // already in place
     }
 
-    // Start the Next.js standalone server on port 38571
+    // Start the Next.js standalone server on port 38571.
+    //
+    // CRITICAL: in production, process.execPath is the Electron binary (e.g.,
+    // DISTORT.exe), NOT Node.js. The Next.js standalone server.js is a pure
+    // Node.js script — it won't run under Electron's GUI process.
+    //
+    // FIX: set ELECTRON_RUN_AS_NODE=1, which tells the Electron binary to
+    // behave as a pure Node.js runtime (no GUI, no Chromium). This is the
+    // standard way to run Node.js scripts from an Electron app.
+    //
+    // Without this fix, the spawn appears to succeed (no error), but the
+    // server never actually starts — the window loads localhost:38571,
+    // gets nothing, and shows the "VPN Engine Ready / RETRY CONNECTION"
+    // offline page forever.
     nextServer = spawnChild(process.execPath, [serverJs], {
       cwd: standalonePath,
       env: {
@@ -2176,6 +2189,10 @@ function startNextServer(): Promise<void> {
         PORT: "38571",
         NODE_ENV: "production",
         HOSTNAME: "127.0.0.1",
+        // CRITICAL: run the Electron binary as pure Node.js so it can
+        // execute the Next.js standalone server.js (which requires Node's
+        // http module, not Electron's GUI APIs).
+        ELECTRON_RUN_AS_NODE: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -2207,6 +2224,29 @@ function startNextServer(): Promise<void> {
           }
         });
     }, 500);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Single-instance lock — prevents multiple DISTORT instances from running.
+// Without this, every click on the app icon spawns a new instance, each
+// trying to start its own Next.js server on port 38571 (which fails for all
+// but the first). This was causing the "20 DISTORT icons in taskbar" bug.
+// ---------------------------------------------------------------------------
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  // Another instance is already running — quit this one immediately.
+  // The existing instance will be focused via the 'second-instance' event.
+  log.info("Another DISTORT instance is already running — quitting this one.");
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    // Someone tried to run a second instance — focus the existing window.
+    log.info("Second instance blocked — focusing existing window.");
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
   });
 }
 
