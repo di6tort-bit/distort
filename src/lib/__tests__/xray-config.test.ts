@@ -140,9 +140,12 @@ for (const tc of TEST_CONFIGS) {
     const tmpFile = join(tmpdir(), `distort-test-${Date.now()}.json`);
     writeFileSync(tmpFile, configJson);
     try {
+      // Set working directory to where xray binary + geo data files are
+      const xrayDir = require("path").dirname(xrayBin);
       const output = execSync(`"${xrayBin}" run -test -c "${tmpFile}"`, {
         encoding: "utf-8",
         timeout: 10000,
+        cwd: xrayDir, // run from xray's directory so it finds geoip.dat/geosite.dat
         stdio: ["pipe", "pipe", "pipe"],
       });
       const ok = output.includes("Configuration OK") || output.includes("ok") || !output.includes("error");

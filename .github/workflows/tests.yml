@@ -29,13 +29,14 @@ jobs:
       - name: Download xray binary for validation
         run: |
           curl -fsSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
-          unzip -o /tmp/xray.zip -d /tmp/xray-tmp
-          chmod +x /tmp/xray-tmp/xray
-          cp /tmp/xray-tmp/xray /tmp/xray
-          chmod +x /tmp/xray
-          echo "XRAY_BIN_PATH=/tmp/xray" >> $GITHUB_ENV
+          unzip -o /tmp/xray.zip -d /tmp/xray-bin
+          chmod +x /tmp/xray-bin/xray
+          # Copy geoip.dat and geosite.dat next to xray binary
+          cp /tmp/xray-bin/geoip.dat /tmp/ 2>/dev/null || true
+          cp /tmp/xray-bin/geosite.dat /tmp/ 2>/dev/null || true
+          echo "XRAY_BIN_PATH=/tmp/xray-bin/xray" >> $GITHUB_ENV
 
-      - name: Run xray run -test validation (with real binary)
+      - name: Run xray run -test validation (with real binary + geo data)
         run: bun run src/lib/__tests__/xray-config.test.ts
         env:
-          XRAY_BIN_PATH: /tmp/xray
+          XRAY_BIN_PATH: /tmp/xray-bin/xray
