@@ -592,36 +592,63 @@ async function enableKillSwitch(): Promise<void> {
       return;
     }
 
-    // Step 1: Get the current default gateway and interface
-    const gatewayInfo = await new Promise<{ gateway: string; iface: number }>((resolve) => {
-      exec("route print 0.0.0.0", (err, stdout) => {
-        if (err) {
-          log.warn(`Kill switch: could not get route table: ${err.message}`);
-          resolve({ gateway: "", iface: 0 });
-          return;
-        }
-        // Parse the output to find the default gateway
-        // Look for "0.0.0.0  0.0.0.0  <gateway>  <interface>"
-        const lines = stdout.split("\n");
-        for (const line of lines) {
-          const match = line.match(/0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+)/);
-          if (match) {
-            resolve({ gateway: match[1], iface: parseInt(match[2]) });
+    // Step 1: Get ALL active IPv4 routes using PowerShell (more reliable than route print)
+    // We need: default gateway, interface index, and interface metric
+    const routeInfo = await new Promise<{ gateway: string; iface: string; ifaceIp: string }>((resolve) => {
+      // PowerShell gives us structured output
+      exec(
+        'powershell -Command "Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1 -Property NextHop,InterfaceIndex,InterfaceAlias | Format-List"',
+        (err, stdout) => {
+          if (err) {
+            log.warn(`Kill switch: PowerShell Get-NetRoute failed: ${err.message}, trying route print`);
+            // Fallback to route print with better parsing
+            exec("route print -4 0.0.0.0", (err2, stdout2) => {
+              if (err2) {
+                resolve({ gateway: "", iface: "", ifaceIp: "" });
+                return;
+              }
+              parseRoutePrintOutput(stdout2, resolve);
+            });
             return;
           }
+          // Parse PowerShell output: "NextHop : 192.168.1.1\nInterfaceIndex : 12\nInterfaceAlias : Ethernet"
+          const gateway = stdout.match(/NextHop\s*:\s*(\d+\.\d+\.\d+\.\d+)/)?.[1] || "";
+          const iface = stdout.match(/InterfaceIndex\s*:\s*(\d+)/)?.[1] || "";
+          // Get interface IP
+          if (iface) {
+            exec(
+              `powershell -Command "(Get-NetIPAddress -InterfaceIndex ${iface} -AddressFamily IPv4).IPAddress"`,
+              (e3, ipOut) => {
+                const ifaceIp = ipOut?.trim() || "";
+                resolve({ gateway, iface, ifaceIp });
+              }
+            );
+          } else {
+            resolve({ gateway, iface, ifaceIp: "" });
+          }
         }
-        resolve({ gateway: "", iface: 0 });
-      });
+      );
     });
 
-    savedDefaultGateway = gatewayInfo.gateway;
-    savedInterfaceIndex = gatewayInfo.iface;
+    savedDefaultGateway = routeInfo.gateway;
+    savedInterfaceIndex = parseInt(routeInfo.iface) || 0;
 
-    if (!savedDefaultGateway) {
-      log.warn("Kill switch: could not find default gateway — kill switch may not work");
-    } else {
-      log.info(`Kill switch: default gateway = ${savedDefaultGateway} (iface ${savedInterfaceIndex})`);
+    if (!savedDefaultGateway || savedInterfaceIndex === 0) {
+      log.error("Kill switch: could not find default route — kill switch ABORTED (would not work)");
+      return;
     }
+
+    log.info(`Kill switch: gateway=${savedDefaultGateway}, iface=${savedInterfaceIndex}, ip=${routeInfo.ifaceIp}`);
+
+    // Persist route info to disk for crash recovery
+    const routeBackupFile = path.join(app.getPath("userData"), "killswitch-backup.json");
+    fs.writeFileSync(routeBackupFile, JSON.stringify({
+      gateway: savedDefaultGateway,
+      interfaceIndex: savedInterfaceIndex,
+      interfaceIp: routeInfo.ifaceIp,
+      timestamp: Date.now(),
+    }));
+    log.info(`Kill switch: route info saved to ${routeBackupFile} for crash recovery`);
 
     // Step 2: Get the VPN server IP
     const vpnServer = store.get("vpn.server") as { host?: string } | null;
@@ -640,7 +667,8 @@ async function enableKillSwitch(): Promise<void> {
     }
 
     // Step 3: Add a specific route for the VPN server (high priority)
-    if (vpnIp && savedDefaultGateway && savedInterfaceIndex > 0) {
+    // This must be done BEFORE removing the default route
+    if (vpnIp) {
       await new Promise<void>((resolve) => {
         exec(
           `route add ${vpnIp} mask 255.255.255.255 ${savedDefaultGateway} metric 1 IF ${savedInterfaceIndex}`,
@@ -657,40 +685,79 @@ async function enableKillSwitch(): Promise<void> {
     }
 
     // Step 4: Remove the default route (blocks all other traffic)
-    if (savedDefaultGateway && savedInterfaceIndex > 0) {
-      await new Promise<void>((resolve) => {
-        exec(
-          `route delete 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} IF ${savedInterfaceIndex}`,
-          (err) => {
-            if (err) {
-              log.warn(`Kill switch: could not remove default route: ${err.message}`);
-            } else {
-              log.info("Kill switch: default route removed — all traffic blocked except VPN server");
-              killSwitchActive = true;
-              mainWindow?.webContents.send("vpn:kill-switch-activated");
-            }
-            resolve();
+    await new Promise<void>((resolve) => {
+      exec(
+        `route delete 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} IF ${savedInterfaceIndex}`,
+        (err) => {
+          if (err) {
+            log.warn(`Kill switch: could not remove default route: ${err.message}`);
+          } else {
+            log.info("Kill switch: default route removed — all traffic blocked except VPN server");
           }
-        );
-      });
-    }
+          resolve();
+        }
+      );
+    });
 
     // Step 5: VERIFY the default route is actually gone
-    await new Promise<void>((resolve) => {
-      exec("route print 0.0.0.0", (err, stdout) => {
-        if (err || !stdout.includes("0.0.0.0")) {
-          log.info("Kill switch: VERIFIED — default route is removed");
-          killSwitchActive = true;
-        } else {
-          log.error("Kill switch: VERIFICATION FAILED — default route still exists!");
-          killSwitchActive = false;
+    // Check for an ACTUAL route row with 0.0.0.0/0, not just the string "0.0.0.0"
+    const verified = await new Promise<boolean>((resolve) => {
+      exec("route print -4 0.0.0.0", (err, stdout) => {
+        if (err) {
+          log.error("Kill switch: VERIFICATION failed — could not query route table");
+          resolve(false);
+          return;
         }
-        resolve();
+        // Look for an actual default route row: "0.0.0.0    0.0.0.0    <gateway>    <iface>"
+        // NOT just any line containing "0.0.0.0" (headers contain it too)
+        const lines = stdout.split("\n");
+        for (const line of lines) {
+          // Match: destination=0.0.0.0, netmask=0.0.0.0, then gateway and metric
+          if (/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+\d+\.\d+\.\d+\.\d+/.test(line)) {
+            log.error(`Kill switch: VERIFICATION FAILED — default route still exists: ${line.trim()}`);
+            resolve(false);
+            return;
+          }
+        }
+        log.info("Kill switch: VERIFIED — no default route found, kill switch is active");
+        resolve(true);
       });
     });
+
+    killSwitchActive = verified;
+    if (verified) {
+      mainWindow?.webContents.send("vpn:kill-switch-activated");
+    }
   } catch (e: any) {
     log.warn(`Kill switch error: ${e?.message}`);
   }
+}
+
+// Helper: parse 'route print' output (fallback when PowerShell isn't available)
+function parseRoutePrintOutput(stdout: string, resolve: (val: { gateway: string; iface: string; ifaceIp: string }) => void) {
+  const lines = stdout.split("\n");
+  for (const line of lines) {
+    // IPv4 route table format:
+    // Network    Netmask       Gateway       Interface    Metric
+    // 0.0.0.0    0.0.0.0       192.168.1.1   192.168.1.5   25
+    const match = line.match(/^\s*0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+)/);
+    if (match) {
+      // match[1] = gateway, match[2] = interface IP, match[3] = metric
+      // We need the interface INDEX, not IP — use the interface IP to find it
+      const gateway = match[1];
+      const ifaceIp = match[2];
+      // Find interface index from IP
+      const { exec } = require("child_process");
+      exec(
+        `powershell -Command "(Get-NetIPAddress -IPAddress ${ifaceIp}).InterfaceIndex"`,
+        (e: any, out: string) => {
+          resolve({ gateway, iface: out?.trim() || "0", ifaceIp });
+        }
+      );
+      return;
+    }
+  }
+  resolve({ gateway: "", iface: "", ifaceIp: "" });
 }
 
 async function disableKillSwitch(): Promise<void> {
@@ -708,10 +775,15 @@ async function disableKillSwitch(): Promise<void> {
             if (err) {
               log.error(`Kill switch: FAILED to restore default route: ${err.message}`);
               log.error("Kill switch: YOUR INTERNET MAY BE BLOCKED — run this manually:");
-              log.error(`  route add 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} metric 25`);
+              log.error(`  route add 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} metric 25 IF ${savedInterfaceIndex}`);
             } else {
               log.info("Kill switch: default route restored — internet is back");
               killSwitchActive = false;
+              // Delete the backup file since we successfully restored
+              try {
+                const routeBackupFile = path.join(app.getPath("userData"), "killswitch-backup.json");
+                if (fs.existsSync(routeBackupFile)) fs.unlinkSync(routeBackupFile);
+              } catch {}
             }
             resolve();
           }
@@ -719,7 +791,7 @@ async function disableKillSwitch(): Promise<void> {
       });
     }
 
-    // Remove the VPN server specific route
+    // Remove the VPN server specific route (re-resolve in case IP changed)
     const vpnServer = store.get("vpn.server") as { host?: string } | null;
     const vpnHost = vpnServer?.host || "";
     if (vpnHost && savedDefaultGateway) {
@@ -732,7 +804,19 @@ async function disableKillSwitch(): Promise<void> {
             exec(`route delete ${vpnIp}`, () => resolve());
           });
         }
-      } catch {}
+      } catch (e: any) {
+        log.warn(`Kill switch: could not remove VPN server route: ${e.message}`);
+        // Try deleting the route using the saved VPN IP (from backup file)
+        try {
+          const routeBackupFile = path.join(app.getPath("userData"), "killswitch-backup.json");
+          if (fs.existsSync(routeBackupFile)) {
+            const backup = JSON.parse(fs.readFileSync(routeBackupFile, "utf-8"));
+            if (backup.vpnIp) {
+              exec(`route delete ${backup.vpnIp}`, () => {});
+            }
+          }
+        } catch {}
+      }
     }
   } catch (e: any) {
     log.warn(`Kill switch disable error: ${e?.message}`);
@@ -909,6 +993,37 @@ function startNextServer(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+  // CRASH RECOVERY: Check if kill switch was active when the app last closed.
+  // If so, restore the default route IMMEDIATELY so the user isn't left
+  // without internet.
+  try {
+    const routeBackupFile = path.join(app.getPath("userData"), "killswitch-backup.json");
+    if (fs.existsSync(routeBackupFile)) {
+      const backup = JSON.parse(fs.readFileSync(routeBackupFile, "utf-8"));
+      log.warn(`Crash recovery: found kill switch backup from ${new Date(backup.timestamp).toISOString()}`);
+      log.warn(`Crash recovery: restoring default route to ${backup.gateway} on interface ${backup.interfaceIndex}…`);
+
+      const { exec } = require("child_process");
+      if (backup.gateway && backup.interfaceIndex) {
+        exec(
+          `route add 0.0.0.0 mask 0.0.0.0 ${backup.gateway} metric 25 IF ${backup.interfaceIndex}`,
+          (err: any) => {
+            if (err) {
+              log.error(`Crash recovery: FAILED to restore route: ${err.message}`);
+              log.error(`Crash recovery: Run manually: route add 0.0.0.0 mask 0.0.0.0 ${backup.gateway} metric 25 IF ${backup.interfaceIndex}`);
+            } else {
+              log.info("Crash recovery: default route restored — internet should be back");
+            }
+            // Delete the backup file so we don't try to restore again next time
+            try { fs.unlinkSync(routeBackupFile); } catch {}
+          }
+        );
+      }
+    }
+  } catch (e: any) {
+    log.warn(`Crash recovery check failed: ${e?.message}`);
+  }
+
   // Start Next.js standalone server first (if available)
   await startNextServer();
 
