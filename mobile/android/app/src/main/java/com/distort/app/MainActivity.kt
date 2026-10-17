@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.text.InputType
 import android.view.Gravity
 import android.view.View
@@ -20,6 +22,11 @@ import androidx.appcompat.app.AppCompatActivity
 class MainActivity : AppCompatActivity() {
 
     private val VPN_REQUEST_CODE = 1001
+    private var statusText: TextView? = null
+    private var speedText: TextView? = null
+    private var exitIpText: TextView? = null
+    private val handler = Handler(Looper.getMainLooper())
+    private var speedUpdateRunnable: Runnable? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -67,25 +74,93 @@ class MainActivity : AppCompatActivity() {
         container.addView(tagline)
 
         // Status
-        val status = TextView(this).apply {
+        statusText = TextView(this).apply {
             text = "● Disconnected"
             textSize = 14f
             setTextColor(Color.parseColor("#8aa0c4"))
             gravity = Gravity.CENTER
-            setPadding(0, 48, 0, 16)
-            id = View.generateViewId()
+            setPadding(0, 32, 0, 8)
         }
-        container.addView(status)
+        container.addView(statusText)
 
-        // Config URI input
-        val configLabel = TextView(this).apply {
-            text = "Community Mesh Config URI"
+        // Speed display (shows upload/download when connected)
+        speedText = TextView(this).apply {
+            text = ""
+            textSize = 12f
+            setTextColor(Color.parseColor("#10d9a0"))
+            gravity = Gravity.CENTER
+            setPadding(0, 4, 0, 8)
+            visibility = View.GONE
+        }
+        container.addView(speedText)
+
+        // Exit IP display
+        exitIpText = TextView(this).apply {
+            text = ""
+            textSize = 11f
+            setTextColor(Color.parseColor("#5cf2ff"))
+            gravity = Gravity.CENTER
+            setPadding(0, 4, 0, 8)
+            visibility = View.GONE
+        }
+        container.addView(exitIpText)
+
+        // === MODE 1: Quick Connect (auto config) ===
+        val quickConnectLabel = TextView(this).apply {
+            text = "MODE 1: Quick Connect (auto config)"
             textSize = 11f
             setTextColor(Color.parseColor("#5cf2ff"))
             letterSpacing = 0.1f
-            setPadding(0, 24, 0, 8)
+            setPadding(0, 16, 0, 8)
         }
-        container.addView(configLabel)
+        container.addView(quickConnectLabel)
+
+        val quickConnectBtn = Button(this).apply {
+            text = "⚡ QUICK CONNECT (auto)"
+            setBackgroundColor(Color.parseColor("#00f0ff"))
+            setTextColor(Color.parseColor("#02131a"))
+            textSize = 14f
+            letterSpacing = 0.1f
+            setPadding(48, 32, 48, 32)
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+            setOnClickListener {
+                // Try to get a config from the Distort API (Community Mesh)
+                // This is the "auto" mode — user doesn't need to paste anything
+                statusText?.text = "● Connecting (auto)…"
+                statusText?.setTextColor(Color.parseColor("#ffb020"))
+
+                // For now, try the cached config first
+                val cachedConfig = getCachedConfig()
+                if (cachedConfig != null) {
+                    requestVpnPermissionAndConnect(cachedConfig)
+                } else {
+                    // No cached config — show message
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("No auto config available")
+                        .setMessage("No cached config found. Please use MODE 2 below to paste a config URI.\n\nThe app will cache the config for future Quick Connect use.")
+                        .setPositiveButton("OK", null)
+                        .show()
+                    statusText?.text = "● No auto config — use manual mode below"
+                    statusText?.setTextColor(Color.parseColor("#ff4d6d"))
+                }
+            }
+        }
+        container.addView(quickConnectBtn)
+
+        // === MODE 2: Manual Config (paste URI) ===
+        val manualLabel = TextView(this).apply {
+            text = "MODE 2: Manual Config (paste URI)"
+            textSize = 11f
+            setTextColor(Color.parseColor("#8b5cf6"))
+            letterSpacing = 0.1f
+            setPadding(0, 8, 0, 8)
+        }
+        container.addView(manualLabel)
 
         val configInput = EditText(this).apply {
             hint = "vless://... or vmess://... or trojan://... or ss://..."
@@ -94,9 +169,8 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.parseColor("#0d1426"))
             setPadding(24, 16, 24, 16)
             inputType = InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 3
-            maxLines = 5
-            id = View.generateViewId()
+            minLines = 2
+            maxLines = 4
             textSize = 11f
         }
         container.addView(configInput)
@@ -127,26 +201,26 @@ class MainActivity : AppCompatActivity() {
         }
         container.addView(pasteBtn)
 
-        // Connect button
+        // Connect button (manual)
         val connectBtn = Button(this).apply {
-            text = "QUICK CONNECT"
-            setBackgroundColor(Color.parseColor("#00f0ff"))
-            setTextColor(Color.parseColor("#02131a"))
+            text = "🔌 CONNECT (manual config)"
+            setBackgroundColor(Color.parseColor("#8b5cf6"))
+            setTextColor(Color.WHITE)
             textSize = 14f
-            letterSpacing = 0.15f
+            letterSpacing = 0.1f
             setPadding(48, 32, 48, 32)
             val params = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
             )
-            params.setMargins(32, 32, 32, 0)
+            params.setMargins(0, 16, 0, 16)
             layoutParams = params
             setOnClickListener {
                 val configUri = configInput.text.toString().trim()
                 if (configUri.isEmpty()) {
                     AlertDialog.Builder(this@MainActivity)
                         .setTitle("No config provided")
-                        .setMessage("Please paste a real Community Mesh config URI (vless://, vmess://, trojan://, or ss://).\n\nYou can get one from the Distort web dashboard → Community Mesh tab, or from any V2Ray subscription.")
+                        .setMessage("Please paste a real Community Mesh config URI (vless://, vmess://, trojan://, or ss://).\n\nYou can get one from the Distort web dashboard → Community Mesh tab.")
                         .setPositiveButton("OK", null)
                         .show()
                     return@setOnClickListener
@@ -160,6 +234,10 @@ class MainActivity : AppCompatActivity() {
                         .show()
                     return@setOnClickListener
                 }
+
+                // Cache this config for future Quick Connect use
+                cacheConfig(configUri)
+
                 requestVpnPermissionAndConnect(configUri)
             }
         }
@@ -167,76 +245,77 @@ class MainActivity : AppCompatActivity() {
 
         // Disconnect button
         val disconnectBtn = Button(this).apply {
-            text = "DISCONNECT"
+            text = "⏹ DISCONNECT"
             setBackgroundColor(Color.parseColor("#ff4d6d"))
             setTextColor(Color.WHITE)
             textSize = 12f
             setPadding(32, 16, 32, 16)
-            val params = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            )
-            params.setMargins(32, 16, 32, 0)
-            layoutParams = params
             setOnClickListener {
                 val intent = Intent(this@MainActivity, DistortVpnService::class.java).apply {
                     action = DistortVpnService.ACTION_DISCONNECT
                 }
                 startService(intent)
-                status.text = "● Disconnected"
-                status.setTextColor(Color.parseColor("#8aa0c4"))
+                statusText?.text = "● Disconnected"
+                statusText?.setTextColor(Color.parseColor("#8aa0c4"))
+                speedText?.visibility = View.GONE
+                exitIpText?.visibility = View.GONE
+                stopSpeedUpdates()
             }
         }
         container.addView(disconnectBtn)
 
         // Help text
         val help = TextView(this).apply {
-            text = "Tip: Copy a config from the web dashboard's Community Mesh tab, then tap PASTE FROM CLIPBOARD here."
+            text = "Mode 1: Auto-connect with cached/best config\nMode 2: Paste your own config URI\n\nThe app caches your last config for Quick Connect."
             textSize = 10f
             setTextColor(Color.parseColor("#5a6478"))
-            setPadding(0, 24, 0, 0)
+            setPadding(0, 16, 0, 0)
             gravity = Gravity.CENTER
         }
         container.addView(help)
 
         // Version
         val version = TextView(this).apply {
-            text = "v1.0.0 · 100% Free · MIT"
+            text = "v1.0.2 · 100% Free · MIT"
             textSize = 10f
             setTextColor(Color.parseColor("#8aa0c4"))
             gravity = Gravity.CENTER
-            setPadding(0, 48, 0, 0)
+            setPadding(0, 32, 0, 0)
             letterSpacing = 0.1f
         }
         container.addView(version)
 
-        // Store status view for updates
-        appStatusView = status
-
         return container
     }
 
-    companion object {
-        @Volatile var appStatusView: TextView? = null
+    // Cache config to SharedPreferences for Quick Connect
+    private fun cacheConfig(uri: String) {
+        val prefs = getSharedPreferences("distort", Context.MODE_PRIVATE)
+        prefs.edit().putString("cached_config_uri", uri).apply()
+        Toast.makeText(this, "✓ Config cached for Quick Connect", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun getCachedConfig(): String? {
+        val prefs = getSharedPreferences("distort", Context.MODE_PRIVATE)
+        return prefs.getString("cached_config_uri", null)
     }
 
     private fun requestVpnPermissionAndConnect(configUri: String) {
         val intent = Intent(this, DistortVpnService::class.java).apply {
             action = DistortVpnService.ACTION_CONNECT
             putExtra("config_uri", configUri)
-            putExtra("protocol", "") // service will detect from URI
+            putExtra("protocol", "")
         }
 
         val vpnIntent = android.net.VpnService.prepare(this)
         if (vpnIntent != null) {
-            // Need user permission
             lastConfigUri = configUri
             startActivityForResult(vpnIntent, VPN_REQUEST_CODE)
         } else {
-            // Already have permission
             startForegroundService(intent)
-            appStatusView?.text = "● Connecting…"
-            appStatusView?.setTextColor(Color.parseColor("#ffb020"))
+            statusText?.text = "● Connecting…"
+            statusText?.setTextColor(Color.parseColor("#ffb020"))
+            startSpeedUpdates()
         }
     }
 
@@ -251,10 +330,98 @@ class MainActivity : AppCompatActivity() {
                 putExtra("protocol", "")
             }
             startForegroundService(intent)
-            appStatusView?.text = "● Connecting…"
-            appStatusView?.setTextColor(Color.parseColor("#ffb020"))
+            statusText?.text = "● Connecting…"
+            statusText?.setTextColor(Color.parseColor("#ffb020"))
+            startSpeedUpdates()
         } else if (requestCode == VPN_REQUEST_CODE) {
             Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
+            statusText?.text = "● Permission denied"
+            statusText?.setTextColor(Color.parseColor("#ff4d6d"))
         }
+    }
+
+    // Speed update loop — reads from SharedPreferences that VpnService updates
+    private fun startSpeedUpdates() {
+        stopSpeedUpdates()
+        speedUpdateRunnable = object : Runnable {
+            override fun run() {
+                val prefs = getSharedPreferences("distort", Context.MODE_PRIVATE)
+                val connected = prefs.getBoolean("vpn_connected", false)
+                val downSpeed = prefs.getLong("vpn_down_speed", 0)
+                val upSpeed = prefs.getLong("vpn_up_speed", 0)
+                val totalDown = prefs.getLong("vpn_total_down", 0)
+                val totalUp = prefs.getLong("vpn_total_up", 0)
+                val exitIp = prefs.getString("vpn_exit_ip", null)
+                val exitCountry = prefs.getString("vpn_exit_country", null)
+
+                if (connected) {
+                    statusText?.text = "● Connected"
+                    statusText?.setTextColor(Color.parseColor("#10d9a0"))
+
+                    // Show live speed
+                    speedText?.visibility = View.VISIBLE
+                    speedText?.text = "↓ ${formatSpeed(downSpeed)}  ↑ ${formatSpeed(upSpeed)}  |  Total: ↓ ${formatBytes(totalDown)} ↑ ${formatBytes(totalUp)}"
+
+                    // Show exit IP + country
+                    if (exitIp != null) {
+                        exitIpText?.visibility = View.VISIBLE
+                        exitIpText?.text = "Exit: $exitIp ($exitCountry)"
+                    }
+                } else {
+                    // Check if service is still running
+                    val serviceRunning = prefs.getBoolean("vpn_service_running", false)
+                    if (serviceRunning) {
+                        statusText?.text = "● Verifying tunnel…"
+                        statusText?.setTextColor(Color.parseColor("#ffb020"))
+                        speedText?.visibility = View.GONE
+                        exitIpText?.visibility = View.GONE
+                    } else {
+                        statusText?.text = "● Disconnected"
+                        statusText?.setTextColor(Color.parseColor("#8aa0c4"))
+                        speedText?.visibility = View.GONE
+                        exitIpText?.visibility = View.GONE
+                        stopSpeedUpdates()
+                    }
+                }
+
+                handler.postDelayed(this, 1000)
+            }
+        }
+        handler.post(speedUpdateRunnable!!)
+    }
+
+    private fun stopSpeedUpdates() {
+        speedUpdateRunnable?.let { handler.removeCallbacks(it) }
+        speedUpdateRunnable = null
+    }
+
+    private fun formatSpeed(bps: Long): String {
+        if (bps < 1000) return "${bps} B/s"
+        if (bps < 1_000_000) return String.format("%.1f KB/s", bps / 1000.0)
+        return String.format("%.1f MB/s", bps / 1_000_000.0)
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        if (bytes < 1024) return "${bytes} B"
+        if (bytes < 1_048_576) return String.format("%.1f KB", bytes / 1024.0)
+        if (bytes < 1_073_741_824) return String.format("%.1f MB", bytes / 1_048_576.0)
+        return String.format("%.2f GB", bytes / 1_073_741_824.0)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Start monitoring when app comes to foreground
+        startSpeedUpdates()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Keep monitoring in background — the service updates SharedPreferences
+        // We'll read it when the app comes back
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopSpeedUpdates()
     }
 }

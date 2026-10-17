@@ -102,6 +102,10 @@ class DistortVpnService : VpnService() {
         Thread {
             try {
                 showNotification("Verifying tunnel…")
+                // Mark service as running for UI
+                val prefs = getSharedPreferences("distort", Context.MODE_PRIVATE)
+                prefs.edit().putBoolean("vpn_service_running", true).apply()
+
                 // Give xray time to fully start up and establish the outbound connection
                 Thread.sleep(1500)
 
@@ -118,6 +122,18 @@ class DistortVpnService : VpnService() {
                 if (verified) {
                     showNotification("Connected · ${host}")
                     Log.i(TAG, "VPN connected successfully — traffic verified through proxy")
+
+                    // Update SharedPreferences for UI
+                    val prefs = getSharedPreferences("distort", Context.MODE_PRIVATE)
+                    prefs.edit()
+                        .putBoolean("vpn_connected", true)
+                        .putBoolean("vpn_service_running", true)
+                        .putString("vpn_exit_ip", exitIp ?: "")
+                        .putString("vpn_exit_country", exitCountry ?: "")
+                        .apply()
+
+                    // Start speed monitor thread
+                    startSpeedMonitor()
                 } else {
                     Log.e(TAG, "xray is alive but traffic verification failed — NOT marking as connected")
                     showNotification("Tunnel started but verification failed")
@@ -627,6 +643,16 @@ class DistortVpnService : VpnService() {
     private fun stopVpn() {
         Log.i(TAG, "Stopping VPN")
         isRunning.set(false)
+
+        // Update SharedPreferences for UI
+        val prefs = getSharedPreferences("distort", Context.MODE_PRIVATE)
+        prefs.edit()
+            .putBoolean("vpn_connected", false)
+            .putBoolean("vpn_service_running", false)
+            .putLong("vpn_down_speed", 0)
+            .putLong("vpn_up_speed", 0)
+            .apply()
+
         try { xrayProcess?.destroy() } catch (e: Exception) {}
         xrayProcess = null
         try { vpnInterface?.close() } catch (e: Exception) {}
@@ -634,6 +660,90 @@ class DistortVpnService : VpnService() {
         try { tunnelThread?.interrupt() } catch (e: Exception) {}
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
+    }
+
+    // Speed monitor — reads /proc/net/dev to estimate traffic through TUN interface
+    // and updates SharedPreferences every second for the UI
+    private var speedMonitorThread: Thread? = null
+    private var lastRxBytes: Long = 0
+    private var lastTxBytes: Long = 0
+    private var totalDown: Long = 0
+    private var totalUp: Long = 0
+
+    private fun startSpeedMonitor() {
+        speedMonitorThread?.interrupt()
+        speedMonitorThread = Thread {
+            while (isRunning.get()) {
+                try {
+                    Thread.sleep(1000)
+
+                    // Read traffic stats from TUN interface
+                    // The TUN interface is created by VpnService, so we can read
+                    // /proc/net/dev to get bytes transferred
+                    val tunRx = readInterfaceBytes("tun0")
+                    val tunTx = readInterfaceBytes("tun0", true)
+
+                    val downDelta = if (tunRx > lastRxBytes) tunRx - lastRxBytes else 0
+                    val upDelta = if (tunTx > lastTxBytes) tunTx - lastTxBytes else 0
+
+                    lastRxBytes = tunRx
+                    lastTxBytes = tunTx
+                    totalDown += downDelta
+                    totalUp += upDelta
+
+                    // Update SharedPreferences for UI
+                    val prefs = getSharedPreferences("distort", Context.MODE_PRIVATE)
+                    prefs.edit()
+                        .putLong("vpn_down_speed", downDelta) // bytes per second
+                        .putLong("vpn_up_speed", upDelta)
+                        .putLong("vpn_total_down", totalDown)
+                        .putLong("vpn_total_up", totalUp)
+                        .apply()
+
+                    // Also update notification with speed
+                    val downSpeed = formatSpeed(downDelta)
+                    val upSpeed = formatSpeed(upDelta)
+                    showNotification("Connected · ↓ $downSpeed ↑ $upSpeed")
+
+                } catch (e: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    Log.w(TAG, "Speed monitor error: ${e.message}")
+                }
+            }
+        }
+        speedMonitorThread?.start()
+    }
+
+    // Read bytes from /proc/net/dev for a given interface
+    private fun readInterfaceBytes(iface: String, tx: Boolean = false): Long {
+        return try {
+            val file = java.io.File("/proc/net/dev")
+            if (!file.exists()) return 0
+
+            val lines = file.readLines()
+            for (line in lines) {
+                if (line.trim().startsWith(iface)) {
+                    val parts = line.trim().split("\\s+".toRegex())
+                    // Format: iface: rx_bytes rx_packets ... tx_bytes tx_packets ...
+                    // rx_bytes is index 1, tx_bytes is index 9
+                    return if (tx) {
+                        parts.getOrElse(9) { "0" }.toLongOrNull() ?: 0
+                    } else {
+                        parts.getOrElse(1) { "0" }.toLongOrNull() ?: 0
+                    }
+                }
+            }
+            0
+        } catch (e: Exception) {
+            0
+        }
+    }
+
+    private fun formatSpeed(bps: Long): String {
+        if (bps < 1000) return "${bps} B/s"
+        if (bps < 1_000_000) return String.format("%.1f KB/s", bps / 1000.0)
+        return String.format("%.1f MB/s", bps / 1_000_000.0)
     }
 
     private fun showNotification(text: String) {
