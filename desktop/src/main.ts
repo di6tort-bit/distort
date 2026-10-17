@@ -12,11 +12,23 @@ import Store from "electron-store";
 import log from "electron-log";
 
 // ---------------------------------------------------------------------------
-// Logging
+// Logging — configure early so we capture errors during startup.
+// electron-log writes to:
+//   - Windows: %APPDATA%/DISTORT/logs/main.log
+//   - macOS:   ~/Library/Logs/DISTORT/main.log
+//   - Linux:   ~/.config/DISTORT/logs/main.log
 // ---------------------------------------------------------------------------
 log.transports.file.level = "info";
 log.transports.console.level = "info";
+
+// Write a clear startup marker so we can find this log entry easily.
+log.info("============================================================");
 log.info("DISTORT Desktop starting up…");
+log.info(`Electron: ${process.versions.electron}`);
+log.info(`Node: ${process.versions.node}`);
+log.info(`Platform: ${process.platform} ${process.arch}`);
+log.info(`Process execPath: ${process.execPath}`);
+log.info("============================================================");
 
 // ---------------------------------------------------------------------------
 // State
