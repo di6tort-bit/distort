@@ -611,6 +611,9 @@ async function enableKillSwitch() {
         }));
         electron_log_1.default.info(`Kill switch: route info saved to ${routeBackupFile} for crash recovery`);
         // Step 2: Get the VPN server IP
+        // CRITICAL: If we can't resolve the VPN server IP, we MUST NOT remove
+        // the default route — otherwise the tunnel can't reconnect and the user
+        // is left without internet.
         const vpnServer = store.get("vpn.server");
         const vpnHost = vpnServer?.host || "";
         let vpnIp = "";
@@ -623,24 +626,29 @@ async function enableKillSwitch() {
                 }
             }
             catch (e) {
-                electron_log_1.default.warn(`Kill switch: could not resolve VPN server IP: ${e.message}`);
+                electron_log_1.default.error(`Kill switch: ABORTED — could not resolve VPN server IP: ${e.message}`);
+                electron_log_1.default.error("Kill switch: If we removed the default route now, the tunnel couldn't reconnect.");
+                return; // FAIL-CLOSED: don't proceed without VPN server route
             }
+        }
+        if (!vpnIp) {
+            electron_log_1.default.error("Kill switch: ABORTED — VPN server IP is empty, cannot add exclusion route");
+            return;
         }
         // Step 3: Add a specific route for the VPN server (high priority)
         // This must be done BEFORE removing the default route
-        if (vpnIp) {
-            await new Promise((resolve) => {
-                exec(`route add ${vpnIp} mask 255.255.255.255 ${savedDefaultGateway} metric 1 IF ${savedInterfaceIndex}`, (err) => {
-                    if (err) {
-                        electron_log_1.default.warn(`Kill switch: could not add VPN server route: ${err.message}`);
-                    }
-                    else {
-                        electron_log_1.default.info(`Kill switch: VPN server ${vpnIp} route added (metric 1)`);
-                    }
-                    resolve();
-                });
+        await new Promise((resolve) => {
+            exec(`route add ${vpnIp} mask 255.255.255.255 ${savedDefaultGateway} metric 1 IF ${savedInterfaceIndex}`, (err) => {
+                if (err) {
+                    electron_log_1.default.error(`Kill switch: ABORTED — could not add VPN server route: ${err.message}`);
+                    electron_log_1.default.error("Kill switch: Without this route, removing default route would break reconnection.");
+                }
+                else {
+                    electron_log_1.default.info(`Kill switch: VPN server ${vpnIp} route added (metric 1)`);
+                }
+                resolve();
             });
-        }
+        });
         // Step 4: Remove the default route (blocks all other traffic)
         await new Promise((resolve) => {
             exec(`route delete 0.0.0.0 mask 0.0.0.0 ${savedDefaultGateway} IF ${savedInterfaceIndex}`, (err) => {
@@ -931,15 +939,17 @@ electron_1.app.whenReady().then(async () => {
                     if (err) {
                         electron_log_1.default.error(`Crash recovery: FAILED to restore route: ${err.message}`);
                         electron_log_1.default.error(`Crash recovery: Run manually: route add 0.0.0.0 mask 0.0.0.0 ${backup.gateway} metric 25 IF ${backup.interfaceIndex}`);
+                        // DO NOT delete the backup file — keep it so the user can retry
+                        // or we can try again on next launch.
                     }
                     else {
                         electron_log_1.default.info("Crash recovery: default route restored — internet should be back");
+                        // Only delete backup after SUCCESSFUL restore
+                        try {
+                            fs.unlinkSync(routeBackupFile);
+                        }
+                        catch { }
                     }
-                    // Delete the backup file so we don't try to restore again next time
-                    try {
-                        fs.unlinkSync(routeBackupFile);
-                    }
-                    catch { }
                 });
             }
         }

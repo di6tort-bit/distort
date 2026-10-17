@@ -1,7 +1,17 @@
 // DISTORT — /api/connect
 // POST { serverId, protocol, action }: action is "connect" | "disconnect".
-// - connect    : create a Session (status connecting), return { ok, session, server }
-// - disconnect : end the latest connecting/connected session for this server.
+//
+// IMPORTANT: This API ONLY creates/updates a Session record in the database.
+// It does NOT start xray, create a TUN device, or change system routing.
+//
+// The REAL VPN connection happens in the Electron desktop app's main process:
+//   desktop/src/main.ts → startVpnEngine() → spawns xray.exe
+//
+// The web dashboard calls this API for bookkeeping (session history, stats),
+// but the actual tunnel is managed by the Electron main process via IPC.
+//
+// If you're running the web app in a browser (not Electron), this API
+// creates a session record but NO actual VPN tunnel is established.
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";

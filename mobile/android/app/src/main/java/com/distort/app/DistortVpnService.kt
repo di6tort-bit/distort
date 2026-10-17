@@ -224,13 +224,18 @@ class DistortVpnService : VpnService() {
         var socket: java.net.Socket? = null
         return try {
             socket = java.net.Socket()
-            // CRITICAL: protect() this socket so it bypasses the VPN tunnel
+            // CRITICAL: protect() this socket so it bypasses the VPN tunnel.
+            // If protect() fails, we CANNOT trust the comparison — return null
+            // (which causes verifyTrafficThroughProxy to return false).
+            // This is FAIL-CLOSED: better to NOT mark connected than to risk
+            // a false "connected" state when we can't verify leaks.
             val protected_ok = protect(socket)
             if (!protected_ok) {
-                Log.w(TAG, "VpnService.protect() failed — direct request may go through tunnel")
-            } else {
-                Log.i(TAG, "VpnService.protect() succeeded — socket bypasses VPN tunnel")
+                Log.e(TAG, "VpnService.protect() FAILED — cannot verify leak, refusing to confirm connected")
+                socket.close()
+                return null
             }
+            Log.i(TAG, "VpnService.protect() succeeded — socket bypasses VPN tunnel")
             socket.connect(java.net.InetSocketAddress("api.ipify.org", 443), 5000)
 
             // Start TLS over the existing socket
@@ -311,9 +316,11 @@ class DistortVpnService : VpnService() {
                     while (isRunning.get() && reader != null) {
                         val line = reader.readLine() ?: break
                         Log.i(TAG, "[xray] $line")
-                        if (line.contains("started") || line.contains("listening")) {
-                            showNotification("Connected · $host")
-                        }
+                        // NOTE: We do NOT show "Connected" here just because xray
+                        // logs "started" or "listening". That only means xray's
+                        // inbound is ready — it does NOT prove traffic flows to
+                        // the destination server. The real verification is done
+                        // in verifyTrafficThroughProxy() which runs separately.
                         if (line.contains("error") || line.contains("failed")) {
                             Log.e(TAG, "[xray error] $line")
                         }
