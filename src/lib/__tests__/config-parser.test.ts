@@ -155,7 +155,7 @@ assert(deduped.length === 1, `Subscription deduplicates (${deduped.length} after
 const sameEndpointDifferentRoutes = [
   "vless://11111111-1111-4111-8111-111111111111@same.example.com:443?security=tls&type=ws&host=cdn.example.com&path=%2Falpha#route-a",
   "vless://22222222-2222-4222-8222-222222222222@same.example.com:443?security=reality&pbk=example-public-key&fp=chrome&type=tcp&sni=www.example.com#route-b",
-].join("\\n");
+].join("\n");
 const distinctRoutes = parseSubscription(sameEndpointDifferentRoutes);
 assert(
   distinctRoutes.length === 2,
@@ -167,7 +167,7 @@ assert(
 const sameRouteDifferentLabels = [
   "vless://11111111-1111-4111-8111-111111111111@same.example.com:443?security=tls&type=ws#label-a",
   "vless://11111111-1111-4111-8111-111111111111@same.example.com:443?security=tls&type=ws#label-b",
-].join("\\n");
+].join("\n");
 const labelDeduped = parseSubscription(sameRouteDifferentLabels);
 assert(
   labelDeduped.length === 1,
