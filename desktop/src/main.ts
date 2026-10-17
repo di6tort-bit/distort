@@ -194,8 +194,9 @@ type VpnState = {
   server: { code: string; country: string; host: string; port: number } | null;
   protocol: string;
   startedAt: number | null;
-  // The raw URI of the selected Community Mesh config (real credentials)
   configUri?: string | null;
+  exitIp?: string | null;
+  exitCountry?: string | null;
 };
 
 type DesktopSettings = {
@@ -399,7 +400,21 @@ async function startVpnEngine(server: VpnState["server"], protocol: string, conf
 
       // Validate response — must contain "ip=" to prove traffic flowed
       if (response.includes("ip=")) {
-        log.info("Traffic verification: REAL HTTP response received through SOCKS proxy — tunnel verified");
+        // Parse exit IP and country from cloudflare trace response
+        // Response format: ip=x.x.x.x\nuag=...\nloc=IR\ncolo=...\n
+        const exitIp = response.match(/ip=([^\r\n]+)/)?.[1]?.trim() || "";
+        const exitCountry = response.match(/loc=([^\r\n]+)/)?.[1]?.trim() || "";
+        log.info(`Traffic verification: exit IP=${exitIp}, country=${exitCountry} — tunnel verified`);
+
+        // Store exit IP + country in VPN state
+        const currentVpn = store.get("vpn");
+        store.set("vpn", {
+          ...currentVpn,
+          exitIp,
+          exitCountry,
+        });
+        mainWindow?.webContents.send("vpn:exit-info", { exitIp, exitCountry });
+
         return true;
       } else {
         log.warn("Traffic verification: SOCKS connected but no valid HTTP response — NOT connected");
@@ -873,49 +888,118 @@ async function disableKillSwitch(): Promise<void> {
 
 async function quickConnect(): Promise<void> {
   try {
-    // Step 1: Get the recommended Distort server (for display purposes)
-    const recUrl = `${getLoadUrl()}/api/servers/recommended`;
-    const recRes = await fetch(recUrl);
-    const recData: any = await recRes.json();
-    const recommendedServer = recData?.server;
-    const recommendedProtocol = recData?.recommendedProtocol || "vless";
-
-    if (!recommendedServer) {
-      log.error("Quick connect failed: no recommended server");
-      mainWindow?.webContents.send("vpn:error", "No servers available");
-      return;
-    }
-
-    // Step 2: Get a REAL config URI from Community Mesh (with real credentials)
-    // Prefer optimized configs (Reality/TLS/Vision) — these have real UUIDs/passwords
-    const meshUrl = `${getLoadUrl()}/api/imported-configs?bucket=optimized&limit=1`;
+    // Step 1: Get multiple optimized configs from Community Mesh
+    // We'll try each one in sequence until one works — this is the
+    // NATIONAL INTERNET RESILIENCE feature: if one config is blocked,
+    // we automatically try the next one.
+    const meshUrl = `${getLoadUrl()}/api/imported-configs?bucket=optimized&limit=20`;
     const meshRes = await fetch(meshUrl);
     const meshData: any = await meshRes.json();
-    const realConfig = meshData?.configs?.[0];
+    const configs = meshData?.configs || [];
 
-    if (!realConfig || !realConfig.uri) {
-      log.error("Quick connect failed: no real Community Mesh config available");
+    if (configs.length === 0) {
+      log.error("Quick connect: no Community Mesh configs available");
       mainWindow?.webContents.send("vpn:error",
-        "No real VPN config available. Please refresh the Community Mesh subscription or import a config."
+        "No VPN configs available. Please refresh the Community Mesh subscription or import a config."
       );
       return;
     }
 
-    log.info(`Quick connect: using real ${realConfig.protocol} config to ${realConfig.host}:${realConfig.port}`);
+    log.info(`Quick connect: trying ${configs.length} optimized configs in sequence (auto-failover)`);
 
-    // Disable kill switch if it was active (we're reconnecting)
-    await disableKillSwitch();
+    // Try each config until one connects successfully
+    for (let i = 0; i < configs.length; i++) {
+      const cfg = configs[i];
+      log.info(`Quick connect: attempt ${i + 1}/${configs.length} — ${cfg.protocol} ${cfg.host}:${cfg.port} (${cfg.flags || 'no flags'})`);
 
-    // Step 3: Build a VpnState server object from the real config
-    const server: VpnState["server"] = {
-      code: realConfig.host,
-      country: realConfig.country || realConfig.host,
-      host: realConfig.host,
-      port: realConfig.port,
-    };
+      // Notify UI of attempt
+      mainWindow?.webContents.send("vpn:connecting", {
+        attempt: i + 1,
+        total: configs.length,
+        host: cfg.host,
+        protocol: cfg.protocol,
+      });
 
-    // Step 4: Start the VPN engine with the REAL config URI
-    await startVpnEngine(server, realConfig.protocol, realConfig.uri);
+      const server: VpnState["server"] = {
+        code: cfg.host,
+        country: cfg.country || cfg.host,
+        host: cfg.host,
+        port: cfg.port,
+      };
+
+      // Disable kill switch before attempting (from previous failed try)
+      await disableKillSwitch();
+
+      try {
+        await startVpnEngine(server, cfg.protocol, cfg.uri);
+
+        // Wait for verification (startVpnEngine does this internally with 5s timeout)
+        // Check if connected after 7 seconds (5s verification + 2s buffer)
+        await new Promise((r) => setTimeout(r, 7000));
+
+        const vpnState = store.get("vpn");
+        if (vpnState.connected) {
+          log.info(`Quick connect: SUCCESS on attempt ${i + 1} — connected via ${cfg.host}`);
+
+          // Step 3: Cache this working config for offline use
+          // (national internet scenario — subscription URL may be unreachable)
+          try {
+            const cacheFile = path.join(app.getPath("userData"), "last-working-config.json");
+            fs.writeFileSync(cacheFile, JSON.stringify({
+              uri: cfg.uri,
+              protocol: cfg.protocol,
+              host: cfg.host,
+              port: cfg.port,
+              country: cfg.country,
+              timestamp: Date.now(),
+            }));
+            log.info(`Quick connect: cached working config to ${cacheFile}`);
+          } catch {}
+
+          return; // Success!
+        } else {
+          log.warn(`Quick connect: attempt ${i + 1} failed — trying next config`);
+          await stopVpnEngine();
+        }
+      } catch (e: any) {
+        log.warn(`Quick connect: attempt ${i + 1} error: ${e?.message} — trying next`);
+        await stopVpnEngine();
+      }
+    }
+
+    // All configs failed — try cached offline config (national internet scenario)
+    log.warn("Quick connect: all Community Mesh configs failed — trying cached offline config");
+    try {
+      const cacheFile = path.join(app.getPath("userData"), "last-working-config.json");
+      if (fs.existsSync(cacheFile)) {
+        const cached = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+        log.info(`Quick connect: trying cached config from ${new Date(cached.timestamp).toISOString()}: ${cached.host}`);
+
+        const server: VpnState["server"] = {
+          code: cached.host,
+          country: cached.country || cached.host,
+          host: cached.host,
+          port: cached.port,
+        };
+
+        await disableKillSwitch();
+        await startVpnEngine(server, cached.protocol, cached.uri);
+
+        await new Promise((r) => setTimeout(r, 7000));
+        const vpnState = store.get("vpn");
+        if (vpnState.connected) {
+          log.info("Quick connect: SUCCESS with cached offline config");
+          return;
+        }
+      }
+    } catch (e: any) {
+      log.warn(`Quick connect: cached config also failed: ${e?.message}`);
+    }
+
+    log.error("Quick connect: ALL configs failed — cannot connect");
+    mainWindow?.webContents.send("vpn:error",
+      "All VPN configs failed. The network may be heavily filtered. Try again later or import a new config."
+    );
   } catch (e: any) {
     log.error("Quick connect failed:", e?.message || e);
     mainWindow?.webContents.send("vpn:error", `Quick connect failed: ${e?.message || "unknown error"}`);
@@ -1084,6 +1168,70 @@ app.whenReady().then(async () => {
   if (store.get("settings.autoConnect")) {
     setTimeout(() => quickConnect(), 1500);
   }
+
+  // AUTO-REFRESH SUBSCRIPTIONS — keeps configs fresh for national internet resilience.
+  // Every 60 minutes, refresh all enabled subscriptions so we always have the latest
+  // working configs. This is critical for Iran: configs get blocked frequently and
+  // new ones are published in the subscription URL regularly.
+  const REFRESH_INTERVAL_MS = 60 * 60 * 1000; // 60 minutes
+  let refreshTimer: NodeJS.Timeout | null = null;
+
+  async function autoRefreshSubscriptions(): Promise<void> {
+    try {
+      log.info("Auto-refresh: refreshing all subscriptions…");
+      const subsRes = await fetch(`${getLoadUrl()}/api/subscriptions`);
+      const subsData: any = await subsRes.json();
+      const subs = subsData?.subscriptions || [];
+
+      for (const sub of subs) {
+        if (!sub.enabled) continue;
+        try {
+          log.info(`Auto-refresh: refreshing "${sub.label}"…`);
+          const refreshRes = await fetch(`${getLoadUrl()}/api/subscriptions/${sub.id}/refresh`, {
+            method: "POST",
+          });
+          const refreshData: any = await refreshRes.json();
+          log.info(`Auto-refresh: "${sub.label}" refreshed — ${refreshData.count || 0} configs`);
+        } catch (e: any) {
+          log.warn(`Auto-refresh: failed to refresh "${sub.label}": ${e?.message}`);
+        }
+      }
+
+      // Also cache all optimized configs to disk for offline use
+      // (national internet scenario — subscription URL may be unreachable)
+      try {
+        const configsRes = await fetch(`${getLoadUrl()}/api/imported-configs?bucket=optimized&limit=500`);
+        const configsData: any = await configsRes.json();
+        const configs = configsData?.configs || [];
+        if (configs.length > 0) {
+          const cacheFile = path.join(app.getPath("userData"), "cached-configs.json");
+          fs.writeFileSync(cacheFile, JSON.stringify({
+            configs: configs.map((c: any) => ({
+              uri: c.uri,
+              protocol: c.protocol,
+              host: c.host,
+              port: c.port,
+              country: c.country,
+              score: c.score,
+              flags: c.flags,
+            })),
+            timestamp: Date.now(),
+          }));
+          log.info(`Auto-refresh: cached ${configs.length} configs to ${cacheFile} for offline use`);
+        }
+      } catch (e: any) {
+        log.warn(`Auto-refresh: failed to cache configs: ${e?.message}`);
+      }
+    } catch (e: any) {
+      log.warn(`Auto-refresh error: ${e?.message}`);
+    }
+  }
+
+  // Run first refresh after 30s (let server start), then every 60min
+  refreshTimer = setTimeout(() => {
+    autoRefreshSubscriptions();
+    refreshTimer = setInterval(autoRefreshSubscriptions, REFRESH_INTERVAL_MS);
+  }, 30000);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

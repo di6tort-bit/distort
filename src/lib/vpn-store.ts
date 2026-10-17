@@ -48,6 +48,8 @@ type LiveStats = {
   totalUp: number;
   ping: number;
   connectedSince: number | null;
+  exitIp?: string | null;
+  exitCountry?: string | null;
 };
 
 type VpnStore = {
@@ -68,6 +70,7 @@ type VpnStore = {
   setCurrentServer: (s: ServerLite | null) => void;
   updateSettings: (patch: Partial<Settings>) => void;
   resetStats: () => void;
+  setExitInfo: (exitIp: string, exitCountry: string) => void;
   // internal ticker id
   _ticker: ReturnType<typeof setInterval> | null;
 };
@@ -196,6 +199,7 @@ export const useVpnStore = create<VpnStore>()(
       setCurrentServer: (s) => set({ currentServer: s }),
       updateSettings: (patch) => set({ settings: { ...get().settings, ...patch } }),
       resetStats: () => set({ live: { ...initialLive } }),
+      setExitInfo: (exitIp, exitCountry) => set({ live: { ...get().live, exitIp, exitCountry } }),
     }),
     {
       name: "distort-vpn",

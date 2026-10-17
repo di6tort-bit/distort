@@ -15,6 +15,16 @@ contextBridge.exposeInMainWorld("distort", {
       ipcRenderer.on("vpn:state-changed", handler);
       return () => ipcRenderer.removeListener("vpn:state-changed", handler);
     },
+    onConnecting: (cb: (info: { attempt: number; total: number; host: string; protocol: string }) => void) => {
+      const handler = (_e: unknown, info: any) => cb(info);
+      ipcRenderer.on("vpn:connecting", handler);
+      return () => ipcRenderer.removeListener("vpn:connecting", handler);
+    },
+    onExitInfo: (cb: (info: { exitIp: string; exitCountry: string }) => void) => {
+      const handler = (_e: unknown, info: { exitIp: string; exitCountry: string }) => cb(info);
+      ipcRenderer.on("vpn:exit-info", handler);
+      return () => ipcRenderer.removeListener("vpn:exit-info", handler);
+    },
     onError: (cb: (error: string) => void) => {
       const handler = (_e: unknown, err: string) => cb(err);
       ipcRenderer.on("vpn:error", handler);

@@ -182,6 +182,24 @@ export function ConnectView({ onPickServer }: { onPickServer: () => void }) {
               <Metric icon={<Activity className="w-3 h-3" />} label="Down" value={formatRate(live.downBps)} color="#10d9a0" />
               <Metric icon={<Radio className="w-3 h-3" />} label="Up" value={formatRate(live.upBps)} color="#00f0ff" />
               <Metric icon={<Zap className="w-3 h-3" />} label="Ping" value={`${live.ping}ms`} color="#ffb020" />
+
+              {/* Exit IP + Country — shows which country's IP we're connected through */}
+              {live.exitIp && (
+                <div className="col-span-3 mt-2 p-3 rounded-lg bg-[#00f0ff]/[0.06] border border-[#00f0ff]/20">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-[10px] font-tech uppercase tracking-wider text-[#5cf2ff] mb-1">Exit IP (verified)</div>
+                      <div className="font-mono text-sm text-white">{live.exitIp}</div>
+                    </div>
+                    {live.exitCountry && (
+                      <div className="text-right">
+                        <div className="text-[10px] font-tech uppercase tracking-wider text-muted-foreground mb-1">Country</div>
+                        <div className="text-lg font-bold text-[#10d9a0]">{live.exitCountry}</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
               <Metric icon={<Activity className="w-3 h-3" />} label="Session" value={formatDuration(elapsed)} color="#8b5cf6" />
               <Metric icon={<Lock className="w-3 h-3" />} label="Downloaded" value={formatBytes(live.totalDown)} color="#eaf2ff" />
               <Metric icon={<Lock className="w-3 h-3" />} label="Uploaded" value={formatBytes(live.totalUp)} color="#eaf2ff" />
