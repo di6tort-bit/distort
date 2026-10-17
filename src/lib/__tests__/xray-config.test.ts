@@ -52,7 +52,7 @@ const TEST_CONFIGS = [
   },
   {
     name: "VMess WS+TLS",
-    uri: "vmess://eyJhZGQiOiJjZG4uZXhhbXBsZS5jb20iLCJhaWQiOiIwIiwiaG9zdCI6ImNkbi5leGFtcGxlLmNvbSIsImlkIjoiYWJjMTIzLWRlZjQ1LTY3ODkwLWFiY2RlZjAxMjM0NSIsIm5ldCI6IndzIiwicGF0aCI6Ii9kaXN0b3J0IiwicG9ydCI6NDQzMywicHMiOiJ3cy10bHMiLCJzY3kiOiJhdXRvIiwic25pIjoiY2RuLmV4YW1wbGUuY29tIiwidGxzIjoidGxzIiwidHlwZSI6Im5vbmUiLCJ2IjoiMiJ9",
+    uri: "vmess://eyJhZGQiOiJjZG4uZXhhbXBsZS5jb20iLCJhaWQiOiIwIiwiaG9zdCI6ImNkbi5leGFtcGxlLmNvbSIsImlkIjoiZjIzNDAxZmItZjRhOC00ZDQ1LTgwYjctY2ZkNDRiNzAzMDhhIiwibmV0Ijoid3MiLCJwYXRoIjoiL2Rpc3RvcnQiLCJwb3J0Ijo0NDMzLCJwcyI6IndzLXRscyIsInNjeSI6ImF1dG8iLCJzbmkiOiJjZG4uZXhhbXBsZS5jb20iLCJ0bHMiOiJ0bHMiLCJ0eXBlIjoibm9uZSIsInYiOiIyIn0=",
   },
   {
     name: "VLESS Reality TCP (Vision)",
@@ -97,7 +97,7 @@ for (const tc of TEST_CONFIGS) {
   assert(realCfg.host.length > 0, `${tc.name}: host extracted`, realCfg.host);
   assert(realCfg.port > 0, `${tc.name}: port extracted`, String(realCfg.port));
 
-  // Step 2: Build xray config JSON
+  // Step 2: Build xray config JSON (tun: false — CI can't create TUN devices)
   let configJson: string;
   try {
     const config = buildRealXrayConfig(realCfg, { tun: false, socksPort: 10808, httpPort: 10809 });
