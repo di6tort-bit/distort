@@ -288,7 +288,10 @@ class RecoveryBridge(
     // Result data class — serialized to JSON via org.json
     // -------------------------------------------------------------------------
 
-    internal data class ConnectResult(
+    // NOTE: ConnectResult is public (not internal) because VerificationSlot.set()
+    // exposes it via a public callback parameter. Kotlin requires that public
+    // functions don't expose internal types.
+    data class ConnectResult(
         val started: Boolean,
         val trafficVerified: Boolean,
         val exitIp: String?,
