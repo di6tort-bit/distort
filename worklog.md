@@ -575,3 +575,38 @@ Stage Summary:
 - TypeScript strict: 0 errors in new files. ESLint: 0 errors, 3 pre-existing warnings (unchanged). Browser console: 0 errors.
 - Honesty is preserved: the recovery state machine badge only flips to "Connected" (green) after real traffic verification — the UI explicitly does NOT auto-advance past "Selecting path" because actual execution (spawn xray + HTTP-through-proxy verify) is Phase 3. The candidate list shows all probes as "not-probed" until the client executes the plan.
 - One UX nuance worth flagging for Phase 3: clicking the action-bar buttons (Recover/Import/Reset) works perfectly in a real browser. Inside the Import dialog, the buttons need type="button" (added) — without it, the HTML default type="submit can cause Radix Dialog to close prematurely on synthetic clicks. Verified the React onClick handlers are correctly wired by dispatching click events via JS eval — all three actions (Recover, Validate, Reset) fire their API calls correctly.
+
+---
+Task ID: EMERGENCY-FINAL
+Agent: main (orchestrator)
+Task: Implement Emergency Connectivity engine per user's design doc
+
+Work Log:
+- Read the user's comprehensive design doc covering: architecture, 4 scenarios, state machine, API endpoints, security/privacy, phased plan, and acceptance criteria.
+- Identified the core principle: "Connected" state must ONLY be set after REAL traffic verification — not process liveness, not port open, not a successful API call. Starlink is NOT a dependency.
+- Phase 1 (self): Created types.ts (all state machine states, probe results, plan/policy contracts, scrubSensitive() helper) + state-machine.ts (pure deterministic 9-state machine with explicit transitions).
+- Phase 2 (parallel subagents):
+  - 2-A: planner.ts (ranks candidates by verification > success streak > failure streak > anti-DPI score > stealth) + policy.ts (exponential backoff, exhaustion, validation) + diagnostics.ts + 89 tests (all pass).
+  - 2-B: Prisma schema (ProbeResult + RecoveryAttempt models) + 5 API endpoints (plan, report, status, configs/validate, provision) with rate limiting + SSRF guards.
+  - 2-C: emergency-connectivity-view.tsx (honesty banner, network diagnosis card, 9-state color-coded badge, candidate list with 3 independent badges per candidate, recovery log with NO CREDENTIALS badge, Import Config dialog with real validation).
+  - 2-D: config-generator.ts refactor (Template/Preview vs Provisioned separation, TEMPLATE_WARNING constant, connectable flag, Account view now shows TEMPLATE ONLY badge + red NOT CONNECTABLE warning bar).
+- Validated end-to-end:
+  - GET /api/emergency/status → 30 managed servers, 29 online, satellite available=false (Phase 5), honesty notice.
+  - POST /api/emergency/plan → 10 candidates including satellite stub (admin tier) + 9 real VLESS Reality configs from Iran Community Mesh, confidence=medium.
+  - POST /api/emergency/configs/validate → parsed a real VLESS Reality URI, structural=valid, reachability=unreachable (3004ms timeout in sandbox — honest fail-closed), tunnel=not-attempted.
+  - UI test via agent-browser: Emergency tab loads with honesty banner + ADMIN tier + satellite toggle; clicking Recover Connection populates 10 candidates with STRUCT/REACH/TUNNEL badges; Import Config dialog validates real URI and shows parsed fields + warnings.
+  - Account view shows "TEMPLATE ONLY" badge + "NOT CONNECTABLE — sample credentials" warning.
+  - bun test src/lib/__tests__/emergency-connectivity.test.ts → 89/89 pass (136 expect() calls).
+  - bun run lint → 0 errors, 3 pre-existing warnings.
+- Committed as 30de0f0 and pushed to main. CI: all 3 builds green (Tests + Windows + Android).
+- Worklog updated across 4 subagent sections (2-A, 2-B, 2-C, 2-D).
+
+Stage Summary:
+- Emergency Connectivity engine implemented per the design doc.
+- Core honesty surface restored: every "Connected" state across the platform now reflects actual verified traffic, not a simulated one.
+- Starlink treated as a VIP-only candidate path stub (Phase 5 will add real provisioning infrastructure) — NOT a dependency.
+- State machine enforces fail-closed: idle→diagnosing→selecting→connecting→verifying→connected (only on traffic verification) → on failure → recovering → exhausted (kill switch enforced).
+- scrubSensitive() strips UUIDs, base64 blobs, passwords in URIs, sensitive query params (pbk/key/password/secret/token/sid), and subscription URLs tokens from ALL persisted/logged strings.
+- SSRF guard blocks private IPs (10.x/192.168.x/172.16-31.x/127.x/169.254.x/::1/ULA) from being probed.
+- Rate limits: 10 plans/min, 60 reports/min, 20 validations/min, 5 provisions/hour per IP.
+- Acceptance criteria from design §10 partially met (Phases 1-4 done; Phase 5 real infra + Phase 6 field testing remain).
