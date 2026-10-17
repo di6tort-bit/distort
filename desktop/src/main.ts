@@ -22,7 +22,7 @@ const store = new Store<{ vpn: VpnState; settings: DesktopSettings }>({
   defaults: {
     vpn: { connected: false, server: null, protocol: "wireguard", startedAt: null },
     settings: {
-      autoConnect: false,
+      autoConnect: true,
       killSwitch: true,
       stealthMode: true,
       dnsLeakProtection: true,
@@ -1091,19 +1091,45 @@ async function disableKillSwitch(): Promise<void> {
 
 async function quickConnect(): Promise<void> {
   try {
-    // Step 1: Get multiple optimized configs from Community Mesh
-    // We'll try each one in sequence until one works — this is the
-    // NATIONAL INTERNET RESILIENCE feature: if one config is blocked,
-    // we automatically try the next one.
-    const meshUrl = `${getLoadUrl()}/api/imported-configs?bucket=optimized&limit=20`;
-    const meshRes = await fetch(meshUrl);
-    const meshData: any = await meshRes.json();
-    const configs = meshData?.configs || [];
+    // Step 1: Get multiple optimized configs from Community Mesh.
+    // Wrapped in try/catch with disk-cache fallback so quickConnect keeps
+    // working in national-internet scenarios where the Distort API is
+    // unreachable but we still have a cached-configs.json from a previous
+    // successful refresh.
+    let configs: any[] = [];
+    try {
+      const meshUrl = `${getLoadUrl()}/api/imported-configs?bucket=optimized&limit=20`;
+      const meshRes = await fetch(meshUrl);
+      if (meshRes.ok) {
+        const meshData: any = await meshRes.json();
+        configs = meshData?.configs || [];
+        log.info(`Quick connect: fetched ${configs.length} configs from API`);
+      } else {
+        log.warn(`Quick connect: API returned ${meshRes.status}, falling back to cache`);
+      }
+    } catch (e: any) {
+      log.warn(`Quick connect: API fetch failed (${e?.message}), falling back to cached configs`);
+    }
+
+    // Fallback to cached configs if API is unreachable or returned empty
+    if (configs.length === 0) {
+      try {
+        const cacheFile = path.join(app.getPath("userData"), "cached-configs.json");
+        if (fs.existsSync(cacheFile)) {
+          const cached = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+          configs = cached.configs || [];
+          log.info(`Quick connect: using ${configs.length} cached configs (offline mode)`);
+        }
+      } catch (e: any) {
+        log.warn(`Quick connect: cache read failed: ${e?.message}`);
+      }
+    }
 
     if (configs.length === 0) {
-      log.error("Quick connect: no Community Mesh configs available");
+      log.error("Quick connect: no configs available (API unreachable AND no cache)");
       mainWindow?.webContents.send("vpn:error",
-        "No VPN configs available. Please refresh the Community Mesh subscription or import a config."
+        "No VPN configs available. The Distort API is unreachable and no cached configs exist. " +
+        "Please connect to the internet briefly to fetch configs, then try again."
       );
       return;
     }
@@ -1430,11 +1456,11 @@ app.whenReady().then(async () => {
     }
   }
 
-  // Run first refresh after 30s (let server start), then every 60min
-  refreshTimer = setTimeout(() => {
-    autoRefreshSubscriptions();
-    refreshTimer = setInterval(autoRefreshSubscriptions, REFRESH_INTERVAL_MS);
-  }, 30000);
+  // Run first refresh IMMEDIATELY (so configs are cached on disk for quick
+  // connect / offline use as soon as possible after startup), then every
+  // 60min for ongoing freshness.
+  autoRefreshSubscriptions();
+  refreshTimer = setInterval(autoRefreshSubscriptions, REFRESH_INTERVAL_MS);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

@@ -157,10 +157,10 @@ async function verifyProxyWorks(server) {
 async function handleConnect(message) {
   const { server, protocol, stealth } = message;
   if (!server || !server.host || !server.port) {
-    throw new Error('Invalid server payload');
+    return { ok: false, error: 'Invalid server payload (missing host/port).' };
   }
 
-  // Mark as "connecting" while we attempt the proxy
+  // Mark as "connecting" while we attempt the proxy.
   await setState({
     connected: false,
     connecting: true,
@@ -187,14 +187,14 @@ async function handleConnect(message) {
     });
     await updateBadge(false);
     await notify('DISTORT — Connection failed', err.message);
-    return { ok: false, error: err.message };
+    return { ok: false, error: `Proxy setup failed: ${err.message}` };
   }
 
   // Proxy was applied successfully — now verify it's actually working
   // by doing a quick reachability check through the proxy.
   const verified = await verifyProxyWorks(server);
   if (!verified) {
-    // Proxy was set but verification failed — don't claim "connected"
+    // Proxy was set but verification failed — don't claim "connected".
     console.warn('Proxy applied but verification failed — server may be unreachable');
     await setState({
       connected: false,
@@ -206,7 +206,7 @@ async function handleConnect(message) {
     return { ok: false, error: 'Server unreachable through proxy' };
   }
 
-  // All checks passed — mark as connected
+  // All checks passed — mark as connected.
   // NOTE: 'connected' here means 'proxy is set AND verification passed'.
   // This does NOT mean the selected protocol (WireGuard/V2Ray/etc.) is running —
   // the extension only sets a SOCKS5 proxy. For real VPN protocols, use the
@@ -227,6 +227,7 @@ async function handleConnect(message) {
   });
   await updateBadge(true);
   await notify('Distort connected', `${server.country} · ${server.city} (SOCKS5 proxy verified)`);
+  return { ok: true, proxyVerified: true };
 }
 
 async function handleDisconnect() {
@@ -268,6 +269,43 @@ function startWebRequestWatcher() {
   }
 }
 
+// --- Fast stats interval (every 2s) ----------------------------------------
+// MV3 alarms have a 30s minimum, so for sub-minute speed updates we run a
+// setInterval while the service worker is alive. If Chrome kills the SW,
+// stats simply pause — the next onAlarm (60s) or message will resync.
+//
+// NOTE: webRequest.onCompleted only counts bytes from completed requests
+// (Content-Length header). Streaming responses (e.g. video, websockets) are
+// NOT counted — this is a Chrome API limitation, not a bug.
+function startFastStatsInterval() {
+  setInterval(async () => {
+    try {
+      const st = await getState();
+      if (!st.connected) return;
+      const now = Date.now();
+      if (byteCounter.lastTs) {
+        const dt = (now - byteCounter.lastTs) / 1000;
+        const downBytes = byteCounter.down - byteCounter.lastDown;
+        const upBytes = byteCounter.up - byteCounter.lastUp;
+        const downSpeed = dt > 0 ? downBytes / dt : 0;
+        const upSpeed = dt > 0 ? upBytes / dt : 0;
+        await setState({
+          bytesDown: (st.bytesDown || 0) + downBytes,
+          bytesUp: (st.bytesUp || 0) + upBytes,
+          downSpeed,
+          upSpeed,
+        });
+      }
+      byteCounter.lastTs = now;
+      byteCounter.lastDown = byteCounter.down;
+      byteCounter.lastUp = byteCounter.up;
+    } catch (err) {
+      // Best-effort — don't crash the SW.
+      console.warn('fast stats interval failed:', err.message);
+    }
+  }, 2000);
+}
+
 // --- Alarms (keep state fresh + badge speed every 60s) ----------------------
 async function setupAlarms() {
   await chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
@@ -277,24 +315,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== ALARM_NAME) return;
   const st = await getState();
   if (!st.connected) return;
-  // Update down/up speed estimate + persist bytes.
-  const now = Date.now();
-  if (byteCounter.lastTs) {
-    const dt = (now - byteCounter.lastTs) / 1000;
-    const downBytes = byteCounter.down - byteCounter.lastDown;
-    const upBytes = byteCounter.up - byteCounter.lastUp;
-    const downSpeed = dt > 0 ? downBytes / dt : 0;
-    const upSpeed = dt > 0 ? upBytes / dt : 0;
-    await setState({
-      bytesDown: (st.bytesDown || 0) + downBytes,
-      bytesUp: (st.bytesUp || 0) + upBytes,
-      downSpeed,
-      upSpeed,
-    });
-  }
-  byteCounter.lastTs = now;
-  byteCounter.lastDown = byteCounter.down;
-  byteCounter.lastUp = byteCounter.up;
+  // The 2s setInterval handles intra-minute updates; the alarm is a safety
+  // net for when the SW has been killed (it re-runs on SW wake).
   // Update badge to show a tiny down speed indicator (truncated to 4 chars).
   try {
     const mbps = (st.downSpeed * 8) / 1e6;
@@ -313,8 +335,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     try {
       switch (message && message.type) {
         case 'connect': {
-          await handleConnect(message);
-          sendResponse({ ok: true });
+          // Forward the actual handleConnect response (which includes
+          // { ok, proxyVerified, error? }) — do NOT blindly return { ok: true }.
+          const result = await handleConnect(message);
+          sendResponse(result);
           break;
         }
         case 'disconnect': {
@@ -351,6 +375,7 @@ chrome.runtime.onInstalled.addListener(async () => {
   await updateBadge(false);
   await setupAlarms();
   startWebRequestWatcher();
+  startFastStatsInterval();
 });
 
 chrome.runtime.onStartup.addListener(async () => {
@@ -358,6 +383,7 @@ chrome.runtime.onStartup.addListener(async () => {
   await updateBadge(st.connected);
   await setupAlarms();
   startWebRequestWatcher();
+  startFastStatsInterval();
 });
 
 // Initialize on first SW spawn.
@@ -366,4 +392,5 @@ chrome.runtime.onStartup.addListener(async () => {
   await updateBadge(st.connected);
   await setupAlarms();
   startWebRequestWatcher();
+  startFastStatsInterval();
 })();

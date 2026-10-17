@@ -122,6 +122,97 @@ body {
   font-weight: 600;
 }
 
+/* Extension-mode banner (honest disclaimer) */
+.mode-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: rgba(41, 98, 255, 0.08);
+  border: 1px solid rgba(41, 98, 255, 0.35);
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text);
+  backdrop-filter: blur(8px);
+}
+.mode-banner-icon {
+  color: var(--blue);
+  flex: none;
+  margin-top: 1px;
+}
+.mode-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+.mode-banner-text strong {
+  color: var(--cyan);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.mode-banner-text a {
+  color: var(--cyan);
+  text-decoration: none;
+  border-bottom: 1px dotted rgba(0, 240, 255, 0.4);
+}
+.mode-banner-text a:hover { opacity: 0.85; }
+.mode-banner-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  flex: none;
+  margin-top: 1px;
+  opacity: 0.7;
+}
+.mode-banner-close:hover { color: var(--text); opacity: 1; }
+
+/* Error banner */
+.error-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: rgba(255, 77, 109, 0.10);
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--danger);
+  backdrop-filter: blur(8px);
+  animation: errorPulse 1.6s ease-out 1;
+}
+@keyframes errorPulse {
+  0%   { box-shadow: 0 0 0 0 rgba(255, 77, 109, 0.5); }
+  100% { box-shadow: 0 0 0 6px rgba(255, 77, 109, 0); }
+}
+.error-banner-icon { flex: none; margin-top: 1px; }
+.error-banner-text {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  word-break: break-word;
+}
+.error-banner-close {
+  background: transparent;
+  border: none;
+  color: var(--danger);
+  cursor: pointer;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  flex: none;
+  margin-top: 1px;
+  opacity: 0.7;
+}
+.error-banner-close:hover { opacity: 1; }
+
 /* Resilience status */
 .resilience {
   display: flex;

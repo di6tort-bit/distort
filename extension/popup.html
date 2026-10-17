@@ -43,6 +43,39 @@
       <span class="version-pill" id="versionPill">v1.0.0</span>
     </header>
 
+    <!-- Extension-mode banner (honest about what the extension can/cannot do) -->
+    <div class="mode-banner" id="modeBanner" role="note">
+      <svg class="mode-banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2"/>
+        <path d="M12 8v5M12 16h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <div class="mode-banner-text">
+        <strong>Browser proxy mode.</strong>
+        Routes Chrome traffic via SOCKS5. Cannot run VLESS/VMess/Trojan/SS —
+        use the <a href="https://distort.app" target="_blank" rel="noreferrer">Distort desktop app</a>
+        for real VPN tunneling.
+      </div>
+      <button class="mode-banner-close" id="modeBannerClose" title="Dismiss" aria-label="Dismiss mode banner">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Error banner (shown when state.error is non-empty) -->
+    <div class="error-banner hidden" id="errorBanner" role="alert">
+      <svg class="error-banner-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <path d="M12 9v4M12 17h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        <path d="M10.3 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+      </svg>
+      <div class="error-banner-text" id="errorText">Connection failed.</div>
+      <button class="error-banner-close" id="errorBannerClose" title="Dismiss" aria-label="Dismiss error">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+      </button>
+    </div>
+
     <!-- Iran-resilience status line -->
     <div class="resilience" id="resilience">
       <span class="resilience-dot" id="resilienceDot"></span>
@@ -65,11 +98,11 @@
 
     <!-- Current server card -->
     <section class="card server-card" id="serverCard">
-      <div class="server-flag" id="serverFlag">🇩🇪</div>
+      <div class="server-flag" id="serverFlag">🖥️</div>
       <div class="server-meta">
         <div class="server-line-1">
-          <span class="server-country" id="serverCountry">Germany</span>
-          <span class="server-city" id="serverCity">Frankfurt</span>
+          <span class="server-country" id="serverCountry">Local</span>
+          <span class="server-city" id="serverCity">Desktop companion</span>
         </div>
         <div class="server-line-2">
           <span class="ping" id="serverPing">— ms</span>

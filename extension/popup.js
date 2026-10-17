@@ -2,21 +2,53 @@
 // Manages UI state, chrome.storage.local persistence, and messaging the service worker.
 //
 // IMPORTANT: This extension is a BROWSER-LEVEL PROXY, not a system VPN.
-// The server list below is EMPTY by default — you must add your own SOCKS5 proxy
-// or use the Distort desktop app for real VPN tunneling.
+// It can only set Chrome's proxy to a SOCKS5/HTTP endpoint.
 //
-// Why? VLESS/VMess/Trojan/Shadowsocks protocols are NOT SOCKS5 proxies — they
-// need a local client (xray-core) to convert them. The Chrome extension can't
-// run xray itself, so it can only use real SOCKS5/HTTP proxies.
+// VLESS/VMess/Trojan/Shadowsocks protocols are NOT SOCKS5 proxies — they need a
+// local client (xray-core) to convert them. The Chrome extension can't run xray
+// itself, so it can only use real SOCKS5/HTTP proxies.
 //
-// To use real VPN protocols, install the Distort desktop app (which bundles xray).
-// The extension is for users who already have a SOCKS5 proxy and want browser-only
-// routing.
+// The DEFAULT_SERVERS below pre-populate the list with the local xray-core SOCKS5
+// listener (127.0.0.1:10808) that the Distort Desktop app exposes, so when the
+// desktop app is running, this extension can ride on top of it for browser-only
+// routing. For real VPN tunneling, install the Distort desktop app.
 
 // --- User-configurable server list (stored in chrome.storage.local) -------------
-let SERVERS = [];  // Loaded from storage; empty until user adds servers.
+let SERVERS = [];  // Loaded from storage; falls back to DEFAULT_SERVERS on first run.
 
-const DEFAULT_SERVERS = [];  // No hardcoded servers — user must add their own.
+const DEFAULT_SERVERS = [
+  // Local xray-core companion (when Distort Desktop is running).
+  // The desktop app listens on 127.0.0.1:10808 (SOCKS5) and 127.0.0.1:10809 (HTTP).
+  // By routing browser traffic through this, the extension rides on top of the
+  // desktop app's real VPN tunnel.
+  {
+    id: 'local-xray',
+    flag: '🖥️',
+    country: 'Local',
+    city: 'Desktop companion',
+    host: '127.0.0.1',
+    port: 10808,
+    ping: 1,
+    load: 0,
+    stealth: true,
+    note: 'Routes through Distort Desktop app (must be running)',
+  },
+  // Public SOCKS5 echo server placeholder for testing — this is NOT a real VPN
+  // endpoint and only useful for verifying the extension's plumbing works.
+  // Replace with your own SOCKS5 in Options before production use.
+  {
+    id: 'test-socks-eu',
+    flag: '🇪🇺',
+    country: 'Test (EU)',
+    city: 'SOCKS5 echo',
+    host: '127.0.0.1',
+    port: 1080,
+    ping: 999,
+    load: 0,
+    stealth: false,
+    note: 'Test only — replace with your own SOCKS5',
+  },
+];
 
 const PROTOCOLS = ['wireguard', 'v2ray', 'trojan', 'shadowsocks'];
 const PROTOCOL_LABELS = { wireguard: 'WireGuard', v2ray: 'V2Ray', trojan: 'Trojan', shadowsocks: 'Shadowsocks' };
@@ -26,7 +58,7 @@ const MANIFEST_VERSION = '1.0.0';
 const DEFAULT_STATE = {
   connected: false,
   connecting: false,
-  serverId: 'de-fra-01',
+  serverId: 'local-xray',
   protocol: 'wireguard',
   stealth: true,
   sessionStart: null,
@@ -35,6 +67,7 @@ const DEFAULT_STATE = {
   downSpeed: 0,
   upSpeed: 0,
   resilience: 'checking',
+  error: null,
 };
 
 let state = { ...DEFAULT_STATE };
@@ -45,6 +78,11 @@ let sessionTimer = null;
 const $ = (id) => document.getElementById(id);
 const els = {
   versionPill:   $('versionPill'),
+  modeBanner:    $('modeBanner'),
+  modeBannerClose: $('modeBannerClose'),
+  errorBanner:   $('errorBanner'),
+  errorText:     $('errorText'),
+  errorBannerClose: $('errorBannerClose'),
   resilience:   $('resilience'),
   resilienceDot: $('resilienceDot'),
   resilienceText: $('resilienceText'),
@@ -202,11 +240,27 @@ function renderStats() {
   }
 }
 
+function renderError() {
+  if (state.error) {
+    els.errorText.textContent = state.error;
+    els.errorBanner.classList.remove('hidden');
+  } else {
+    els.errorBanner.classList.add('hidden');
+    els.errorText.textContent = '';
+  }
+}
+
+function clearError() {
+  state.error = null;
+  renderError();
+}
+
 function renderAll() {
   renderConnectButton();
   renderServerCard();
   renderServerList(els.serverSearch.value);
   renderStats();
+  renderError();
   // Protocol pills
   els.protoSelect.querySelectorAll('.proto-pill').forEach((b) => {
     b.classList.toggle('active', b.dataset.proto === state.protocol);
@@ -217,7 +271,21 @@ function renderAll() {
 
 // --- Storage -----------------------------------------------------------------
 async function loadState() {
-  const data = await chrome.storage.local.get(['distortState', 'settings']);
+  const data = await chrome.storage.local.get([
+    'distortState',
+    'settings',
+    'distortServers',
+    'modeBannerDismissed',
+  ]);
+  // --- Servers: prefer persisted list, fall back to DEFAULT_SERVERS ---
+  if (Array.isArray(data.distortServers) && data.distortServers.length > 0) {
+    SERVERS = data.distortServers;
+  } else {
+    SERVERS = DEFAULT_SERVERS.slice();
+    // Persist the defaults so the user can edit them via Options later.
+    await chrome.storage.local.set({ distortServers: SERVERS });
+  }
+  // --- State ---
   if (data.distortState) {
     state = { ...state, ...data.distortState };
   }
@@ -227,7 +295,11 @@ async function loadState() {
   if (data.settings && typeof data.settings.stealthMode === 'boolean') {
     state.stealth = data.settings.stealthMode;
   }
-  // If we were connected across popup reopens, verify with background.
+  // --- Mode banner dismissal ---
+  if (data.modeBannerDismissed) {
+    els.modeBanner.classList.add('hidden');
+  }
+  // --- Live state from background (if connected) ---
   try {
     const live = await chrome.runtime.sendMessage({ type: 'getState' });
     if (live && typeof live.connected === 'boolean') {
@@ -238,6 +310,13 @@ async function loadState() {
       state.bytesUp = live.bytesUp ?? state.bytesUp;
       state.downSpeed = live.downSpeed ?? state.downSpeed;
       state.upSpeed = live.upSpeed ?? state.upSpeed;
+      // Surface background-side errors (e.g. proxy verification failed).
+      if (live.error && !state.error) state.error = live.error;
+      // If background says NOT connected but we thought we were, fix it.
+      if (!live.connected && state.connected) {
+        state.connected = false;
+        state.connecting = false;
+      }
     }
   } catch {
     // Background may be asleep; ignore.
@@ -249,32 +328,68 @@ async function saveState() {
 }
 
 // --- Connection --------------------------------------------------------------
+// REAL connect flow:
+//   1. Validate we have a server to connect to.
+//   2. Send `connect` message and AWAIT the background's response.
+//   3. Background returns { ok: true, proxyVerified: true } on success.
+//   4. Only then do we mark `connected = true`.
+//   5. On any failure, set state.error + show the error banner.
+//   6. NEVER use setTimeout to fake a transition.
 async function connect() {
   if (state.connecting || state.connected) return;
-  state.connecting = true;
-  renderConnectButton();
+  if (!SERVERS.length) {
+    state.error = 'No servers configured. Click "Sync servers" to fetch from Distort, or add a SOCKS5 proxy in Options.';
+    renderAll();
+    return;
+  }
   const server = currentServer();
+  if (!server || !server.host || !server.port) {
+    state.error = 'No server selected.';
+    renderAll();
+    return;
+  }
+
+  state.connecting = true;
+  state.error = null;
+  renderConnectButton();
+  renderError();
+
   try {
-    await chrome.runtime.sendMessage({
+    const resp = await chrome.runtime.sendMessage({
       type: 'connect',
       server,
       protocol: state.protocol,
       stealth: state.stealth,
     });
+    // Background returns { ok: true/false, error?: string, proxyVerified?: bool }
+    if (resp && resp.ok && resp.proxyVerified) {
+      state.connecting = false;
+      state.connected = true;
+      state.sessionStart = Date.now();
+      state.bytesDown = 0;
+      state.bytesUp = 0;
+      state.downSpeed = 0;
+      state.upSpeed = 0;
+      state.error = null;
+      await saveState();
+      renderAll();
+      startStatsTimers();
+    } else {
+      // Background reported failure — do NOT mark connected.
+      state.connecting = false;
+      state.connected = false;
+      state.error = (resp && resp.error) ||
+        'Connection failed — proxy verification did not pass.';
+      await saveState();
+      renderAll();
+    }
   } catch (err) {
     console.warn('connect message failed:', err);
-  }
-  // Background will ack via alarm / state poll; simulate transition.
-  setTimeout(async () => {
     state.connecting = false;
-    state.connected = true;
-    state.sessionStart = Date.now();
-    state.bytesDown = 0;
-    state.bytesUp = 0;
-    await saveState();
+    state.connected = false;
+    state.error = `Extension communication failed: ${err.message || err}`;
     renderAll();
-    startStatsTimers();
-  }, 900);
+  }
 }
 
 async function disconnect() {
@@ -284,6 +399,7 @@ async function disconnect() {
   state.sessionStart = null;
   state.downSpeed = 0;
   state.upSpeed = 0;
+  state.error = null;
   await saveState();
   try {
     await chrome.runtime.sendMessage({ type: 'disconnect' });
@@ -299,25 +415,47 @@ function toggleConnect() {
   else connect();
 }
 
-// --- Stats timers (simulated traffic for demo purposes) ----------------------
+// --- Stats timers (REAL traffic measurement) -------------------------------
+// The background service worker counts bytes via chrome.webRequest.onCompleted
+// and persists them in storage.local under the `distortState` key (plus an
+// in-memory counter that is flushed every 2s). The popup READS those values —
+// it never generates fake speeds with Math.random().
+async function refreshStatsFromBackground() {
+  try {
+    const live = await chrome.runtime.sendMessage({ type: 'getState' });
+    if (live) {
+      state.bytesDown = live.bytesDown ?? state.bytesDown;
+      state.bytesUp = live.bytesUp ?? state.bytesUp;
+      state.downSpeed = live.downSpeed ?? state.downSpeed;
+      state.upSpeed = live.upSpeed ?? state.upSpeed;
+      // If background has flipped to disconnected (proxy dropped), reflect it.
+      if (live.connected === false && state.connected) {
+        state.connected = false;
+        state.connecting = false;
+        state.error = live.error || 'Proxy dropped unexpectedly.';
+        stopStatsTimers();
+        renderAll();
+        return;
+      }
+    }
+  } catch {
+    // Background may be asleep — keep last-known values.
+  }
+  renderStats();
+}
+
 function startStatsTimers() {
   stopStatsTimers();
-  // Update session + simulated speeds every 1s.
+  // Update session timer every 1s (no saveState — purely a UI refresh).
   sessionTimer = setInterval(() => {
     renderStats();
   }, 1000);
-  // Every 2s, simulate a new speed reading.
-  statsTimer = setInterval(async () => {
-    const srv = currentServer();
-    // Simulate: better stealth servers give steadier speeds.
-    const base = srv.stealth ? 18 : 12;
-    state.downSpeed = (base + Math.random() * 35) * 1e6 / 8; // bytes/sec
-    state.upSpeed = (base / 4 + Math.random() * 8) * 1e6 / 8;
-    state.bytesDown += state.downSpeed * 2;
-    state.bytesUp += state.upSpeed * 2;
-    await saveState();
-    renderStats();
+  // Every 2s, refresh real byte counts from the background.
+  statsTimer = setInterval(() => {
+    refreshStatsFromBackground();
   }, 2000);
+  // Initial fetch.
+  refreshStatsFromBackground();
 }
 
 function stopStatsTimers() {
@@ -326,21 +464,56 @@ function stopStatsTimers() {
 }
 
 // --- Sync (best-effort fetch from web app) -----------------------------------
+// Fetches https://distort.app/api/servers.json and merges any entries that have
+// a `socksHost`/`socksPort` field into our local SERVERS list (dedup by id).
 async function syncServers() {
   els.syncBtn.classList.add('syncing');
   els.syncBtn.querySelector('span').textContent = 'Syncing…';
   try {
-    // Best-effort: try to fetch from the Distort web app.
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), 4000);
     const res = await fetch('https://distort.app/api/servers.json', { signal: ctrl.signal });
     clearTimeout(t);
     if (res.ok) {
       const json = await res.json();
-      if (Array.isArray(json) && json.length > 0) {
-        // Validate / merge into our list (kept minimal: only update if shape matches).
-        // We don't replace our hard-coded list to avoid breaking the demo.
-        els.syncBtn.querySelector('span').textContent = `Synced ${json.length} servers`;
+      const list = Array.isArray(json) ? json : (json.servers || []);
+      if (Array.isArray(list) && list.length > 0) {
+        // Normalize remote entries that expose a SOCKS5 front.
+        const remote = list
+          .filter((s) => s && (s.socksHost || s.host) && (s.socksPort || s.port))
+          .map((s) => ({
+            id: s.id || `remote-${(s.socksHost || s.host)}-${(s.socksPort || s.port)}`,
+            flag: s.flag || '🌐',
+            country: s.country || 'Remote',
+            city: s.city || s.region || '',
+            host: s.socksHost || s.host,
+            port: Number(s.socksPort || s.port),
+            ping: Number(s.ping || 0) || 0,
+            load: Number(s.load || 0) || 0,
+            stealth: !!s.stealth,
+            note: s.note || 'Synced from Distort',
+          }));
+        if (remote.length === 0) {
+          els.syncBtn.querySelector('span').textContent =
+            'No SOCKS5 servers in remote list';
+        } else {
+          // Merge: keep existing entries, append new ones (dedup by id).
+          const byId = new Map(SERVERS.map((s) => [s.id, s]));
+          let added = 0;
+          for (const r of remote) {
+            if (!byId.has(r.id)) {
+              SERVERS.push(r);
+              byId.set(r.id, r);
+              added++;
+            }
+          }
+          await chrome.storage.local.set({ distortServers: SERVERS });
+          renderServerList(els.serverSearch.value);
+          els.syncBtn.querySelector('span').textContent =
+            added > 0
+              ? `Synced ${added} new server${added === 1 ? '' : 's'}`
+              : `All ${remote.length} remote already known`;
+        }
       } else {
         els.syncBtn.querySelector('span').textContent = 'No remote servers';
       }
@@ -437,6 +610,21 @@ function wireEvents() {
   });
 
   els.syncBtn.addEventListener('click', syncServers);
+
+  // Error banner close button — clears the displayed error (does not retry).
+  els.errorBannerClose.addEventListener('click', () => {
+    clearError();
+  });
+
+  // Mode-banner dismiss — hides the disclaimer until the extension is reinstalled.
+  els.modeBannerClose.addEventListener('click', async () => {
+    els.modeBanner.classList.add('hidden');
+    try {
+      await chrome.storage.local.set({ modeBannerDismissed: true });
+    } catch {
+      // ignore
+    }
+  });
 
   // Live resilience re-assessment on storage changes from options page.
   chrome.storage.onChanged.addListener((changes, area) => {

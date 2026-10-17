@@ -9,6 +9,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
@@ -119,7 +120,7 @@ class DistortVpnService : VpnService() {
 
                 // Verify traffic actually flows through the SOCKS proxy
                 val verified = verifyTrafficThroughProxy()
-                if (verified) {
+                if (verified.ok) {
                     showNotification("Connected · ${host}")
                     Log.i(TAG, "VPN connected successfully — traffic verified through proxy")
 
@@ -128,8 +129,8 @@ class DistortVpnService : VpnService() {
                     prefs.edit()
                         .putBoolean("vpn_connected", true)
                         .putBoolean("vpn_service_running", true)
-                        .putString("vpn_exit_ip", exitIp ?: "")
-                        .putString("vpn_exit_country", exitCountry ?: "")
+                        .putString("vpn_exit_ip", verified.exitIp ?: "")
+                        .putString("vpn_exit_country", verified.exitCountry ?: "")
                         .apply()
 
                     // Start speed monitor thread
@@ -159,7 +160,9 @@ class DistortVpnService : VpnService() {
      * the VPN tunnel. Without this, the "direct" request would also be
      * routed through the tunnel, making the comparison meaningless.
      */
-    private fun verifyTrafficThroughProxy(): Boolean {
+    private data class VerificationResult(val ok: Boolean, val exitIp: String? = null, val exitCountry: String? = null)
+
+    private fun verifyTrafficThroughProxy(): VerificationResult {
         return try {
             // 1. Get exit IP through SOCKS proxy
             val proxy = java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", 10808))
@@ -169,7 +172,7 @@ class DistortVpnService : VpnService() {
                 // NO FALLBACK — if we can't get traffic through the proxy, we
                 // are NOT connected. Do not assume connected just because SOCKS
                 // port is open.
-                return false
+                return VerificationResult(ok = false)
             }
             Log.i(TAG, "Traffic verification: exit IP = $exitIp")
 
@@ -179,7 +182,7 @@ class DistortVpnService : VpnService() {
                 // CRITICAL: If we can't get the real IP, we CANNOT verify there's no leak.
                 // Do NOT assume connected — return false to be safe.
                 Log.e(TAG, "Traffic verification: could not fetch real IP — cannot verify no leak, NOT marking as connected")
-                return false
+                return VerificationResult(ok = false, exitIp = exitIp)
             }
             Log.i(TAG, "Traffic verification: real IP (protected) = $realIp")
 
@@ -187,15 +190,15 @@ class DistortVpnService : VpnService() {
             if (exitIp == realIp) {
                 Log.e(TAG, "TRAFFIC LEAK DETECTED: exit IP ($exitIp) == real IP ($realIp)")
                 Log.e(TAG, "This means traffic is NOT going through the VPN tunnel!")
-                return false
+                return VerificationResult(ok = false, exitIp = exitIp)
             }
 
             Log.i(TAG, "✓ Traffic verification passed: exit IP differs from real IP — VPN is working")
-            true
+            VerificationResult(ok = true, exitIp = exitIp)
         } catch (e: Exception) {
             Log.e(TAG, "Traffic verification failed: ${e.message}")
             // NO FALLBACK — any verification failure means we are NOT connected.
-            return false
+            return VerificationResult(ok = false)
         }
     }
 
