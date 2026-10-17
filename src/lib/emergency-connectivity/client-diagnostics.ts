@@ -40,16 +40,23 @@ const DNS_CANARY = "https://dns.cloudflare.com/";
 
 type RawProbe = {
   url: string;
-  ok: boolean;
+  state: "ok" | "timeout" | "unknown";
   latencyMs: number;
   // 'domestic' | 'international' | 'dns-canary'
   category: "domestic" | "international" | "dns-canary";
 };
 
-// Fetch a URL with a timeout. Returns ok=true if we got ANY response
-// (even a CORS error means the server responded = reachable).
-// Returns ok=false only on timeout or network error.
-async function probeUrl(url: string, timeoutMs = 5000): Promise<{ ok: boolean; latencyMs: number }> {
+// Fetch a URL with a timeout. Returns one of three states:
+//   - "ok" — fetch succeeded (got any HTTP response, even opaque)
+//   - "timeout" — request timed out
+//   - "unknown" — fetch threw but we can't tell if it's CORS, network error, or DNS
+//
+// CRITICAL FIX (per user review issue #5): the previous logic treated any
+// fetch error with latency > 50ms as "reachable". This was wrong — a DNS
+// resolution failure can take >50ms, and a connection-refused can too.
+// We now return "unknown" for ambiguous errors instead of falsely
+// claiming "reachable".
+async function probeUrl(url: string, timeoutMs = 5000): Promise<{ state: "ok" | "timeout" | "unknown"; latencyMs: number }> {
   const start = performance.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -63,30 +70,29 @@ async function probeUrl(url: string, timeoutMs = 5000): Promise<{ ok: boolean; l
       redirect: "manual", // don't follow redirects — we just want "did it respond"
     });
     clearTimeout(timeout);
-    return { ok: true, latencyMs: Math.round(performance.now() - start) };
+    // If fetch resolved without throwing, the server responded (even if
+    // the response is an opaque CORS-blocked one). This is a real reach.
+    return { state: "ok", latencyMs: Math.round(performance.now() - start) };
   } catch (e: unknown) {
     clearTimeout(timeout);
-    // In no-cors mode, a TypeError often means "CORS blocked" — but the server
-    // DID respond. A network error (ERR_INTERNET_DISCONNECTED) also throws.
-    // We can't reliably distinguish in-browser, so we treat TypeError as
-    // "possibly reachable" and only return ok=false on explicit AbortError
-    // (timeout) or if navigator.onLine is false.
     const err = e as { name?: string };
-    if (err?.name === "AbortError") {
-      return { ok: false, latencyMs: timeoutMs };
-    }
-    // If we're offline per navigator, it's a real failure
-    if (typeof navigator !== "undefined" && navigator.onLine === false) {
-      return { ok: false, latencyMs: Math.round(performance.now() - start) };
-    }
-    // TypeError after a fetch often means CORS preflight failed — but the
-    // server may still have responded. Be conservative: treat as reachable
-    // only if the latency was reasonable (> 50ms suggests a real round-trip).
     const latency = Math.round(performance.now() - start);
-    if (latency > 50 && latency < timeoutMs) {
-      return { ok: true, latencyMs: latency };
+
+    // Timeout — server did not respond in time. Definitively unreachable.
+    if (err?.name === "AbortError") {
+      return { state: "timeout", latencyMs: timeoutMs };
     }
-    return { ok: false, latencyMs: latency };
+
+    // If navigator says offline, it's a real failure
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      return { state: "timeout", latencyMs: latency };
+    }
+
+    // Ambiguous error: could be CORS (server responded), DNS failure
+    // (no response), connection refused (server down), or network error.
+    // We CANNOT determine which from the browser. Return "unknown" so the
+    // caller can decide based on multiple probes.
+    return { state: "unknown", latencyMs: latency };
   }
 }
 
@@ -94,7 +100,7 @@ async function probeAll(targets: string[], category: RawProbe["category"], timeo
   const results = await Promise.all(
     targets.map(async (url) => {
       const r = await probeUrl(url, timeoutMs);
-      return { url, ok: r.ok, latencyMs: r.latencyMs, category };
+      return { url, state: r.state, latencyMs: r.latencyMs, category };
     })
   );
   return results;
@@ -126,13 +132,29 @@ export async function diagnoseClientSide(): Promise<NetworkDiagnosis> {
     probeAll([DNS_CANARY], "dns-canary", 4000),
   ]);
 
-  const domesticReachable = domestic.some((p) => p.ok);
-  const internationalReachable = international.some((p) => p.ok);
-  const dnsWorks = dns.some((p) => p.ok) || internationalReachable;
+  // COUNT states per category — use multiple probes to distinguish
+  // real reachability from ambiguous CORS errors.
+  // A category is "reachable" only if at least one probe returned "ok".
+  // A category is "unknown" if all probes returned "unknown" (ambiguous).
+  const domesticOk = domestic.filter((p) => p.state === "ok").length;
+  const domesticUnknown = domestic.filter((p) => p.state === "unknown").length;
+  const intlOk = international.filter((p) => p.state === "ok").length;
+  const intlUnknown = international.filter((p) => p.state === "unknown").length;
+  const dnsOk = dns.filter((p) => p.state === "ok").length;
+  const dnsUnknown = dns.filter((p) => p.state === "unknown").length;
+
+  const domesticReachable = domesticOk > 0;
+  const internationalReachable = intlOk > 0;
+  // DNS works if either the canary responded or any international probe did
+  const dnsWorks = dnsOk > 0 || internationalReachable;
+
+  // Confidence: if all probes returned "unknown", we can't be sure.
+  const allUnknown = (domesticOk === 0 && domesticUnknown > 0) ||
+                     (intlOk === 0 && intlUnknown > 0);
 
   // Latency: take the minimum successful international probe
   const okLatencies = international
-    .filter((p) => p.ok)
+    .filter((p) => p.state === "ok")
     .map((p) => p.latencyMs);
   const directLatencyMs = okLatencies.length > 0 ? Math.min(...okLatencies) : null;
 
@@ -140,8 +162,12 @@ export async function diagnoseClientSide(): Promise<NetworkDiagnosis> {
   let baseNetwork: BaseNetworkStatus;
   if (internationalReachable || domesticReachable) {
     baseNetwork = "online";
+  } else if (allUnknown && navOnline) {
+    // All probes ambiguous — we can't tell if it's online or offline.
+    // Honest: report as "unknown" rather than guessing.
+    baseNetwork = "unknown";
   } else if (navOnline) {
-    // navigator says online but we couldn't reach anything — local-only or DNS broken
+    // navigator says online but all probes timed out (not unknown)
     baseNetwork = "local-only";
   } else {
     baseNetwork = "offline";
@@ -150,9 +176,9 @@ export async function diagnoseClientSide(): Promise<NetworkDiagnosis> {
   // Build an honest summary
   const parts: string[] = [];
   parts.push(`Base network: ${baseNetwork}.`);
-  parts.push(`Domestic (Iran) reachable: ${domesticReachable ? "yes" : "no"}.`);
-  parts.push(`International reachable: ${internationalReachable ? "yes" : "no"}.`);
-  parts.push(`DNS works: ${dnsWorks ? "yes" : "no"}.`);
+  parts.push(`Domestic (Iran) reachable: ${domesticReachable ? "yes" : domesticUnknown > 0 ? "unknown" : "no"}.`);
+  parts.push(`International reachable: ${internationalReachable ? "yes" : intlUnknown > 0 ? "unknown" : "no"}.`);
+  parts.push(`DNS works: ${dnsWorks ? "yes" : dnsUnknown > 0 ? "unknown" : "no"}.`);
   if (directLatencyMs !== null) {
     parts.push(`Direct latency (min): ${directLatencyMs}ms.`);
   } else {
@@ -178,12 +204,16 @@ export async function diagnoseClientSide(): Promise<NetworkDiagnosis> {
 
 // Lighter-weight continuous health check — used by the monitoring loop
 // after a tunnel is established. Returns just "online" + latency.
-export async function quickHealthCheck(timeoutMs = 3000): Promise<{ online: boolean; latencyMs: number | null }> {
+// NOTE: returns "unknown" state if the probe was ambiguous — caller should
+// treat "unknown" as "possibly still connected, don't trigger recovery yet".
+export async function quickHealthCheck(timeoutMs = 3000): Promise<{ online: boolean; unknown: boolean; latencyMs: number | null }> {
   if (typeof navigator !== "undefined" && !navigator.onLine) {
-    return { online: false, latencyMs: null };
+    return { online: false, unknown: false, latencyMs: null };
   }
   const r = await probeUrl("https://1.1.1.1/cdn-cgi/trace", timeoutMs);
-  return { online: r.ok, latencyMs: r.ok ? r.latencyMs : null };
+  if (r.state === "ok") return { online: true, unknown: false, latencyMs: r.latencyMs };
+  if (r.state === "unknown") return { online: false, unknown: true, latencyMs: null };
+  return { online: false, unknown: false, latencyMs: null };
 }
 
 // Detect if the network changed (e.g. Wi-Fi → mobile data).

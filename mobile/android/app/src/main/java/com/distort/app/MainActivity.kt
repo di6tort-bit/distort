@@ -105,6 +105,47 @@ class MainActivity : AppCompatActivity() {
         }
         container.addView(exitIpText)
 
+        // === MODE 0: Web Dashboard (native bridge to RecoveryEngine) ===
+        //
+        // Launches DashboardWebViewActivity which loads https://distort.app
+        // inside an Android WebView with the RecoveryBridge JavascriptInterface
+        // injected as `window.DistortNative`. The dashboard's RecoveryEngine
+        // detects this and uses AndroidNativeEngine to actually drive the VPN
+        // service (spawn xray via VpnService, verify real traffic, etc.).
+        //
+        // This is the recommended way to use Distort on Android — the web UI
+        // is far more capable than the minimal native UI below, and the bridge
+        // makes the Emergency Connectivity button ACTUALLY connect (instead of
+        // honestly reporting "browser-only cannot connect").
+        val webDashboardLabel = TextView(this).apply {
+            text = "MODE 0: Web Dashboard (Emergency Connectivity engine)"
+            textSize = 11f
+            setTextColor(Color.parseColor("#10d9a0"))
+            letterSpacing = 0.1f
+            setPadding(0, 16, 0, 8)
+        }
+        container.addView(webDashboardLabel)
+
+        val openDashboardBtn = Button(this).apply {
+            text = "🌐 OPEN WEB DASHBOARD"
+            setBackgroundColor(Color.parseColor("#10d9a0"))
+            setTextColor(Color.parseColor("#02131a"))
+            textSize = 14f
+            letterSpacing = 0.1f
+            setPadding(48, 32, 48, 32)
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+            params.setMargins(0, 0, 0, 16)
+            layoutParams = params
+            setOnClickListener {
+                val intent = Intent(this@MainActivity, DashboardWebViewActivity::class.java)
+                startActivity(intent)
+            }
+        }
+        container.addView(openDashboardBtn)
+
         // === MODE 1: Quick Connect (auto config) ===
         val quickConnectLabel = TextView(this).apply {
             text = "MODE 1: Quick Connect (auto config)"

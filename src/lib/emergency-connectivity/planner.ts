@@ -112,7 +112,11 @@ async function loadCandidates(req: PlanRequest): Promise<CandidatePath[]> {
     antiDpiScore: c.score,
     exitCountry: c.country,
     vipOnly: false, // Community Mesh configs are free for all users.
-    configUri: c.uri, // NEVER logged — see SENSITIVITY note at top of file.
+    // CRITICAL: configUri is NEVER included in the plan response. It contains
+    // credentials (UUIDs, passwords, keys). The client must fetch it
+    // separately via POST /api/emergency/candidates/[id]/uri, which is
+    // rate-limited and (in production) requires authentication.
+    configUri: "", // empty string = "fetch via secure endpoint"
     lastProbe: null, // Populated by the client after probing.
     successStreak: 0,
     failureStreak: 0,

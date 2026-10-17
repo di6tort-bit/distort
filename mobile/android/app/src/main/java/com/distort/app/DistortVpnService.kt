@@ -114,6 +114,15 @@ class DistortVpnService : VpnService() {
                     val exitCode = try { xrayProcess?.exitValue() ?: -1 } catch (e: Exception) { -1 }
                     Log.e(TAG, "xray failed to start, exit=$exitCode")
                     showNotification("Connection failed")
+                    // Report to the RecoveryBridge so the WebView knows the connect failed.
+                    RecoveryBridge.VerificationSlot.report(
+                        started = false,
+                        trafficVerified = false,
+                        exitIp = null,
+                        realIp = null,
+                        error = "xray process exited early (exit=$exitCode) — config rejected or runtime error.",
+                        latencyMs = null
+                    )
                     stopVpn()
                     return@Thread
                 }
@@ -133,6 +142,16 @@ class DistortVpnService : VpnService() {
                         .putString("vpn_exit_country", verified.exitCountry ?: "")
                         .apply()
 
+                    // Report success to RecoveryBridge → unblocks RecoveryBridge.connect().
+                    RecoveryBridge.VerificationSlot.report(
+                        started = true,
+                        trafficVerified = true,
+                        exitIp = verified.exitIp,
+                        realIp = verified.realIp,
+                        error = null,
+                        latencyMs = verified.latencyMs
+                    )
+
                     // Start speed monitor thread
                     startSpeedMonitor()
                 } else {
@@ -140,9 +159,30 @@ class DistortVpnService : VpnService() {
                     showNotification("Tunnel started but verification failed")
                     // Keep the notification but don't claim connected — user should see the issue
                     // Don't auto-stop; let the user see the logs and decide
+
+                    // Report the verification failure to RecoveryBridge — the connect()
+                    // call MUST unblock with trafficVerified=false so the RecoveryEngine
+                    // tries the next candidate (no fake "connected").
+                    RecoveryBridge.VerificationSlot.report(
+                        started = true,            // xray did launch — but traffic didn't verify
+                        trafficVerified = false,
+                        exitIp = verified.exitIp,
+                        realIp = verified.realIp,
+                        error = verified.error ?: "Tunnel started but traffic verification failed.",
+                        latencyMs = verified.latencyMs
+                    )
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Startup check failed", e)
+                // Even on an unexpected exception, unblock the bridge with a clear error.
+                RecoveryBridge.VerificationSlot.report(
+                    started = false,
+                    trafficVerified = false,
+                    exitIp = null,
+                    realIp = null,
+                    error = "Startup check exception: ${e.message ?: e.javaClass.simpleName}",
+                    latencyMs = null
+                )
             }
         }.start()
     }
@@ -160,9 +200,17 @@ class DistortVpnService : VpnService() {
      * the VPN tunnel. Without this, the "direct" request would also be
      * routed through the tunnel, making the comparison meaningless.
      */
-    private data class VerificationResult(val ok: Boolean, val exitIp: String? = null, val exitCountry: String? = null)
+    private data class VerificationResult(
+        val ok: Boolean,
+        val exitIp: String? = null,
+        val exitCountry: String? = null,
+        val realIp: String? = null,
+        val latencyMs: Int? = null,
+        val error: String? = null
+    )
 
     private fun verifyTrafficThroughProxy(): VerificationResult {
+        val verifyStart = System.currentTimeMillis()
         return try {
             // 1. Get exit IP through SOCKS proxy
             val proxy = java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", 10808))
@@ -172,7 +220,11 @@ class DistortVpnService : VpnService() {
                 // NO FALLBACK — if we can't get traffic through the proxy, we
                 // are NOT connected. Do not assume connected just because SOCKS
                 // port is open.
-                return VerificationResult(ok = false)
+                return VerificationResult(
+                    ok = false,
+                    latencyMs = (System.currentTimeMillis() - verifyStart).toInt(),
+                    error = "Could not fetch exit IP through SOCKS proxy — xray not routing traffic."
+                )
             }
             Log.i(TAG, "Traffic verification: exit IP = $exitIp")
 
@@ -182,7 +234,12 @@ class DistortVpnService : VpnService() {
                 // CRITICAL: If we can't get the real IP, we CANNOT verify there's no leak.
                 // Do NOT assume connected — return false to be safe.
                 Log.e(TAG, "Traffic verification: could not fetch real IP — cannot verify no leak, NOT marking as connected")
-                return VerificationResult(ok = false, exitIp = exitIp)
+                return VerificationResult(
+                    ok = false,
+                    exitIp = exitIp,
+                    latencyMs = (System.currentTimeMillis() - verifyStart).toInt(),
+                    error = "Could not fetch real IP via protected socket — cannot verify no leak."
+                )
             }
             Log.i(TAG, "Traffic verification: real IP (protected) = $realIp")
 
@@ -190,15 +247,30 @@ class DistortVpnService : VpnService() {
             if (exitIp == realIp) {
                 Log.e(TAG, "TRAFFIC LEAK DETECTED: exit IP ($exitIp) == real IP ($realIp)")
                 Log.e(TAG, "This means traffic is NOT going through the VPN tunnel!")
-                return VerificationResult(ok = false, exitIp = exitIp)
+                return VerificationResult(
+                    ok = false,
+                    exitIp = exitIp,
+                    realIp = realIp,
+                    latencyMs = (System.currentTimeMillis() - verifyStart).toInt(),
+                    error = "Traffic leak detected — exit IP matches real IP."
+                )
             }
 
             Log.i(TAG, "✓ Traffic verification passed: exit IP differs from real IP — VPN is working")
-            VerificationResult(ok = true, exitIp = exitIp)
+            VerificationResult(
+                ok = true,
+                exitIp = exitIp,
+                realIp = realIp,
+                latencyMs = (System.currentTimeMillis() - verifyStart).toInt()
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Traffic verification failed: ${e.message}")
             // NO FALLBACK — any verification failure means we are NOT connected.
-            return VerificationResult(ok = false)
+            return VerificationResult(
+                ok = false,
+                latencyMs = (System.currentTimeMillis() - verifyStart).toInt(),
+                error = "Verification exception: ${e.message ?: e.javaClass.simpleName}"
+            )
         }
     }
 
@@ -655,6 +727,23 @@ class DistortVpnService : VpnService() {
             .putLong("vpn_down_speed", 0)
             .putLong("vpn_up_speed", 0)
             .apply()
+
+        // Notify the RecoveryBridge (if a connect() is currently blocked on
+        // its latch) that the tunnel was stopped. This unblocks the JS-side
+        // AndroidNativeEngine.connect() so the RecoveryEngine can move on.
+        // Without this, stopVpn() would leave the latch hanging until timeout.
+        try {
+            RecoveryBridge.VerificationSlot.report(
+                started = false,
+                trafficVerified = false,
+                exitIp = null,
+                realIp = null,
+                error = "Tunnel stopped by disconnect() or service shutdown.",
+                latencyMs = null
+            )
+        } catch (_: Throwable) {
+            // Best-effort — never let bridge reporting break stopVpn()
+        }
 
         try { xrayProcess?.destroy() } catch (e: Exception) {}
         xrayProcess = null

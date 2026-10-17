@@ -31,6 +31,29 @@
             </intent-filter>
         </activity>
 
+        <!--
+            DashboardWebViewActivity — hosts the Distort web dashboard inside a WebView
+            with the RecoveryBridge JavascriptInterface injected as `window.DistortNative`.
+            This is what connects the web RecoveryEngine to DistortVpnService.
+
+            NOT exported — only launchable by the Distort app itself (via MainActivity).
+            The WebView loads https://distort.app; in dev mode it loads localhost:3000.
+            INTERNET permission is already declared above.
+            Hardware-accelerated for smooth WebView rendering.
+
+            NOTE: usesCleartextTraffic is allowed at the activity level so that
+            local dev (http://10.0.2.2:3000) works without a separate network
+            security config. Production traffic still uses HTTPS — the WebView's
+            MIXED_CONTENT_NEVER_ALLOW setting enforces this in the renderer.
+        -->
+        <activity
+            android:name=".DashboardWebViewActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+            android:hardwareAccelerated="true"
+            android:usesCleartextTraffic="true"
+            android:theme="@style/Theme.Distort" />
+
         <service
             android:name=".DistortVpnService"
             android:exported="false"

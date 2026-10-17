@@ -7,7 +7,7 @@
 // `RecoveryEngine` (from src/lib/emergency-connectivity/recovery-engine.ts):
 //
 //   1. On mount: detects whether the Distort Desktop companion is running at
-//      127.0.0.1:10809, loads local configs from IndexedDB, and runs an initial
+//      127.0.0.1:10810, loads local configs from IndexedDB, and runs an initial
 //      client-side network diagnosis (real probes to 1.1.1.1 / cloudflare / iran.ir).
 //   2. When the user clicks "Recover Connection", we instantiate a RecoveryEngine
 //      with an `onStatusChange` callback that mirrors the engine's status into
@@ -580,7 +580,7 @@ export function EmergencyConnectivityView() {
               </div>
               <div className="text-xs text-muted-foreground mt-0.5">
                 {companionDetected
-                  ? "Desktop companion detected at 127.0.0.1:10809 — real tunneling available. The engine will verify traffic through the local SOCKS5 proxy."
+                  ? "Desktop companion detected at 127.0.0.1:10810 — real tunneling available. The engine will start xray via the companion control API and verify tunnel traffic through the local SOCKS5 proxy."
                   : "No desktop companion — browser can diagnose but cannot connect. Install the Distort Desktop app for real connectivity."}
               </div>
             </div>
@@ -611,7 +611,7 @@ export function EmergencyConnectivityView() {
           The web dashboard can diagnose your network and validate configs. To
           actually establish a VPN tunnel, install the{" "}
           <span className="text-[#5cf2ff]">Distort Desktop</span> app (which
-          exposes a local control API at 127.0.0.1:10809) or the Android app.
+          exposes a local control API at 127.0.0.1:10810) or the Android app.
           The engine will still try each candidate and report which ones have
           valid structure + reachable servers, so when you install the desktop
           app, it knows which to use.

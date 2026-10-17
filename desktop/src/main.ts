@@ -4,6 +4,9 @@
 import { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell, session } from "electron";
 import * as path from "path";
 import * as fs from "fs";
+import * as http from "http";
+import * as https from "https";
+import { URL } from "url";
 import { spawn, ChildProcess } from "child_process";
 import Store from "electron-store";
 import log from "electron-log";
@@ -36,6 +39,24 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let vpnProcess: ChildProcess | null = null;
 let isQuitting = false;
+
+// ---------------------------------------------------------------------------
+// Companion control API — localhost-only HTTP server on port 10810
+// (port 10809 is xray's HTTP proxy inbound, NOT a control API — see
+// real-xray-config.ts: buildRealXrayConfig uses 10808 for SOCKS5 and
+// 10809 for the HTTP proxy inbound. The control API must use a DIFFERENT
+// port so the BrowserWithCompanionEngine in recovery-engine.ts can
+// actually reach it.)
+// ---------------------------------------------------------------------------
+const COMPANION_API_HOST = "127.0.0.1"; // localhost ONLY — never 0.0.0.0
+const COMPANION_API_PORT = 10810; // NOT 10809 (that's xray's HTTP proxy)
+const COMPANION_API_VERSION = "1.0.0";
+const COMPANION_API_PLATFORM = "desktop-companion";
+const COMPANION_START_TIMEOUT_MS = 10_000;
+const COMPANION_VERIFY_TIMEOUT_MS = 15_000;
+const COMPANION_MAX_BODY_BYTES = 1024 * 1024; // 1MB cap on POST bodies
+
+let companionApiServer: http.Server | null = null;
 
 // ---------------------------------------------------------------------------
 // Window
@@ -226,6 +247,32 @@ function getWintunPath(): string {
   return path.join(process.resourcesPath, "bin", "wintun.dll");
 }
 
+// Build a REAL xray config from a raw config URI (vmess://, vless://, trojan://, ss://).
+// This is the extracted, reusable form: it takes ONLY a configUri (no server object)
+// because the URI itself carries the host/port/credentials. Used by both the desktop
+// UI's startVpnEngine() and the companion control API's /api/tunnel/start endpoint.
+//
+// Throws an honest error if the URI can't be parsed — NO fake/placeholder credentials.
+function buildXrayConfigFromUri(configUri: string): object {
+  if (!configUri || typeof configUri !== "string" || configUri.length < 10) {
+    throw new Error("Invalid configUri — expected a non-empty vmess://, vless://, trojan://, or ss:// URI");
+  }
+  const { parseUriToRealConfig, buildRealXrayConfig } = require("./real-xray-config");
+  const realCfg = parseUriToRealConfig(configUri);
+  if (!realCfg) {
+    throw new Error(
+      "Could not parse the provided config URI — expected vmess://, vless://, trojan://, or ss://"
+    );
+  }
+  const settings = store.get("settings");
+  return buildRealXrayConfig(realCfg, {
+    tun: true, // system-wide tunnel via wintun.dll
+    socksPort: 10808,
+    httpPort: 10809,
+    dnsLeakProtection: settings.dnsLeakProtection !== false,
+  });
+}
+
 // Build a REAL xray config using real credentials from a Community Mesh URI.
 // Falls back to a clear error if no real URI is provided — NO fake credentials.
 function buildXrayConfig(server: VpnState["server"], protocol: string, configUri?: string | null): object {
@@ -233,19 +280,7 @@ function buildXrayConfig(server: VpnState["server"], protocol: string, configUri
 
   // If we have a real Community Mesh URI, use ITS credentials (not fakes).
   if (configUri && typeof configUri === "string" && configUri.length > 10) {
-    // Inline import to avoid circular deps
-    const { parseUriToRealConfig, buildRealXrayConfig } = require("./real-xray-config");
-    const realCfg = parseUriToRealConfig(configUri);
-    if (realCfg) {
-      const settings = store.get("settings");
-      return buildRealXrayConfig(realCfg, {
-        tun: true, // system-wide tunnel via wintun.dll
-        socksPort: 10808,
-        httpPort: 10809,
-        dnsLeakProtection: settings.dnsLeakProtection !== false,
-      });
-    }
-    throw new Error("Could not parse the provided config URI");
+    return buildXrayConfigFromUri(configUri);
   }
 
   // No real URI → throw an honest error instead of using fake credentials.
@@ -256,6 +291,154 @@ function buildXrayConfig(server: VpnState["server"], protocol: string, configUri
 }
 
 import { randomUUID as cryptoRandomUUID } from "crypto";
+
+// ---------------------------------------------------------------------------
+// Tunnel traffic verification — top-level (reused by both the desktop UI's
+// startVpnEngine() startup flow AND the companion control API's
+// /api/tunnel/verify endpoint).
+//
+// Strategy: do a real SOCKS5 → TLS → HTTP GET through xray's local SOCKS5
+// proxy (127.0.0.1:10808) to https://www.cloudflare.com/cdn-cgi/trace.
+// If we get a response containing "ip=", the tunnel is verified working
+// and we extract the exit IP + country.
+//
+// This is the ONLY way to prove the tunnel actually carries traffic —
+// NOT just checking if the SOCKS port is open (that only proves xray's
+// inbound is ready, not that the outbound to the VPN server works).
+// ---------------------------------------------------------------------------
+type VerifyTunnelResult = {
+  verified: boolean;
+  exitIp: string | null;
+  exitCountry: string | null;
+  latencyMs: number | null;
+  error?: string;
+};
+
+async function verifyTunnelTraffic(): Promise<VerifyTunnelResult> {
+  const startTime = Date.now();
+  let socksSocket: any = null;
+  let tlsSocket: any = null;
+  try {
+    const net = require("net");
+    const { connect: tlsConnect } = await import("tls");
+
+    // Create a SOCKS5 connection to xray's local proxy
+    socksSocket = new net.Socket();
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("SOCKS connect timeout")), 5000);
+      socksSocket.connect(10808, "127.0.0.1", () => { clearTimeout(t); resolve(); });
+      socksSocket.on("error", (err: any) => { clearTimeout(t); reject(err); });
+    });
+
+    // SOCKS5 greeting: version 5, 1 auth method, no auth
+    socksSocket.write(Buffer.from([0x05, 0x01, 0x00]));
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("SOCKS greeting timeout")), 5000);
+      socksSocket.once("data", () => { clearTimeout(t); resolve(); });
+    });
+
+    // SOCKS5 CONNECT request to www.cloudflare.com:443
+    const targetHost = "www.cloudflare.com";
+    const hostBytes = Buffer.from(targetHost);
+    const connectReq = Buffer.concat([
+      Buffer.from([0x05, 0x01, 0x00, 0x03]),
+      Buffer.from([hostBytes.length]),
+      hostBytes,
+      Buffer.from([0x01, 0xbb]), // port 443
+    ]);
+    socksSocket.write(connectReq);
+
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("SOCKS CONNECT timeout")), 8000);
+      socksSocket.once("data", (data: Buffer) => {
+        clearTimeout(t);
+        if (data[1] === 0x00) {
+          resolve(); // connected through SOCKS
+        } else {
+          reject(new Error(`SOCKS CONNECT failed: code ${data[1]}`));
+        }
+      });
+    });
+
+    // Wrap in TLS
+    tlsSocket = tlsConnect({ socket: socksSocket, servername: targetHost });
+    await new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("TLS handshake timeout")), 8000);
+      tlsSocket.once("secureConnect", () => { clearTimeout(t); resolve(); });
+      tlsSocket.once("error", (err: any) => { clearTimeout(t); reject(err); });
+    });
+
+    // Send HTTP request
+    tlsSocket.write("GET /cdn-cgi/trace HTTP/1.1\r\nHost: www.cloudflare.com\r\nConnection: close\r\n\r\n");
+
+    const response = await new Promise<string>((resolve, reject) => {
+      let data = "";
+      const t = setTimeout(() => resolve(data), 8000);
+      tlsSocket.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+      tlsSocket.on("end", () => { clearTimeout(t); resolve(data); });
+      tlsSocket.on("error", (err: any) => { clearTimeout(t); reject(err); });
+    });
+
+    const latencyMs = Date.now() - startTime;
+
+    // Validate response — must contain "ip=" to prove traffic flowed
+    if (response.includes("ip=")) {
+      // Parse exit IP and country from cloudflare trace response
+      // Response format: ip=x.x.x.x\nuag=...\nloc=IR\ncolo=...\n
+      const exitIp = response.match(/ip=([^\r\n]+)/)?.[1]?.trim() || "";
+      const exitCountry = response.match(/loc=([^\r\n]+)/)?.[1]?.trim() || "";
+      return {
+        verified: true,
+        exitIp: exitIp || null,
+        exitCountry: exitCountry || null,
+        latencyMs,
+      };
+    } else {
+      return {
+        verified: false,
+        exitIp: null,
+        exitCountry: null,
+        latencyMs,
+        error: "SOCKS connected but no valid HTTP response (no 'ip=' in cloudflare/cdn-cgi/trace)",
+      };
+    }
+  } catch (e: any) {
+    return {
+      verified: false,
+      exitIp: null,
+      exitCountry: null,
+      latencyMs: Date.now() - startTime,
+      error: e?.message || String(e),
+    };
+  } finally {
+    // Always clean up sockets
+    try { tlsSocket?.destroy(); } catch {}
+    try { socksSocket?.destroy(); } catch {}
+  }
+}
+
+// Fetch the device's REAL public IP by doing a DIRECT (non-proxied) HTTPS
+// GET to cloudflare/cdn-cgi/trace. Used by /api/tunnel/verify to compare
+// against the exit IP — if they match, traffic is NOT going through the
+// tunnel (leak). If they differ, tunnel is verified working.
+async function fetchRealIp(): Promise<string | null> {
+  return new Promise((resolve) => {
+    const req = https.get(
+      "https://www.cloudflare.com/cdn-cgi/trace",
+      { timeout: 8000 },
+      (res: http.IncomingMessage) => {
+        let data = "";
+        res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
+        res.on("end", () => {
+          const match = data.match(/ip=([^\r\n]+)/);
+          resolve(match ? match[1].trim() : null);
+        });
+      }
+    );
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => { req.destroy(); resolve(null); });
+  });
+}
 
 async function startVpnEngine(server: VpnState["server"], protocol: string, configUri?: string | null): Promise<void> {
   if (!server) throw new Error("No server selected");
@@ -333,104 +516,32 @@ async function startVpnEngine(server: VpnState["server"], protocol: string, conf
   // This is the ONLY way to verify the tunnel works — NOT just checking if the
   // SOCKS port is open (that only proves xray's inbound is ready, not outbound).
   //
-  // We do a full SOCKS5 handshake + TLS + HTTP GET to cloudflare/cdn-cgi/trace.
-  // If we get a valid response containing "ip=", the tunnel is verified working.
-  // If ANY step fails → return false (NOT connected). No fallbacks.
+  // We delegate to the top-level verifyTunnelTraffic() which does a full SOCKS5
+  // handshake + TLS + HTTP GET to cloudflare/cdn-cgi/trace and returns structured
+  // data (verified + exitIp + exitCountry + latencyMs + error). The wrapper below
+  // keeps the side effects that integrate with the desktop UI's startup flow
+  // (updating the global vpn state + sending IPC events to the renderer).
   async function verifyHttpThroughProxy(): Promise<boolean> {
     // Make this function accessible to health monitoring (top-level ref)
     verifyHttpThroughProxyRef = verifyHttpThroughProxy;
-    let socksSocket: any = null;
-    let tlsSocket: any = null;
-    try {
-      const net = require("net");
-      const { connect: tlsConnect } = await import("tls");
-
-      // Create a SOCKS5 connection to xray's local proxy
-      socksSocket = new net.Socket();
-      await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("SOCKS connect timeout")), 5000);
-        socksSocket.connect(10808, "127.0.0.1", () => { clearTimeout(t); resolve(); });
-        socksSocket.on("error", (err: any) => { clearTimeout(t); reject(err); });
+    const result = await verifyTunnelTraffic();
+    if (result.verified && result.exitIp) {
+      log.info(`Traffic verification: exit IP=${result.exitIp}, country=${result.exitCountry} — tunnel verified (latency=${result.latencyMs}ms)`);
+      // Store exit IP + country in VPN state
+      const currentVpn = store.get("vpn");
+      store.set("vpn", {
+        ...currentVpn,
+        exitIp: result.exitIp,
+        exitCountry: result.exitCountry,
       });
-
-      // SOCKS5 greeting: version 5, 1 auth method, no auth
-      socksSocket.write(Buffer.from([0x05, 0x01, 0x00]));
-      await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("SOCKS greeting timeout")), 5000);
-        socksSocket.once("data", () => { clearTimeout(t); resolve(); });
+      mainWindow?.webContents.send("vpn:exit-info", {
+        exitIp: result.exitIp,
+        exitCountry: result.exitCountry,
       });
-
-      // SOCKS5 CONNECT request to www.cloudflare.com:443
-      const targetHost = "www.cloudflare.com";
-      const hostBytes = Buffer.from(targetHost);
-      const connectReq = Buffer.concat([
-        Buffer.from([0x05, 0x01, 0x00, 0x03]),
-        Buffer.from([hostBytes.length]),
-        hostBytes,
-        Buffer.from([0x01, 0xbb]), // port 443
-      ]);
-      socksSocket.write(connectReq);
-
-      await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("SOCKS CONNECT timeout")), 8000);
-        socksSocket.once("data", (data: Buffer) => {
-          clearTimeout(t);
-          if (data[1] === 0x00) {
-            resolve(); // connected through SOCKS
-          } else {
-            reject(new Error(`SOCKS CONNECT failed: code ${data[1]}`));
-          }
-        });
-      });
-
-      // Wrap in TLS
-      tlsSocket = tlsConnect({ socket: socksSocket, servername: targetHost });
-      await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("TLS handshake timeout")), 8000);
-        tlsSocket.once("secureConnect", () => { clearTimeout(t); resolve(); });
-        tlsSocket.once("error", (err: any) => { clearTimeout(t); reject(err); });
-      });
-
-      // Send HTTP request
-      tlsSocket.write("GET /cdn-cgi/trace HTTP/1.1\r\nHost: www.cloudflare.com\r\nConnection: close\r\n\r\n");
-
-      const response = await new Promise<string>((resolve, reject) => {
-        let data = "";
-        const t = setTimeout(() => resolve(data), 8000);
-        tlsSocket.on("data", (chunk: Buffer) => { data += chunk.toString(); });
-        tlsSocket.on("end", () => { clearTimeout(t); resolve(data); });
-        tlsSocket.on("error", (err: any) => { clearTimeout(t); reject(err); });
-      });
-
-      // Validate response — must contain "ip=" to prove traffic flowed
-      if (response.includes("ip=")) {
-        // Parse exit IP and country from cloudflare trace response
-        // Response format: ip=x.x.x.x\nuag=...\nloc=IR\ncolo=...\n
-        const exitIp = response.match(/ip=([^\r\n]+)/)?.[1]?.trim() || "";
-        const exitCountry = response.match(/loc=([^\r\n]+)/)?.[1]?.trim() || "";
-        log.info(`Traffic verification: exit IP=${exitIp}, country=${exitCountry} — tunnel verified`);
-
-        // Store exit IP + country in VPN state
-        const currentVpn = store.get("vpn");
-        store.set("vpn", {
-          ...currentVpn,
-          exitIp,
-          exitCountry,
-        });
-        mainWindow?.webContents.send("vpn:exit-info", { exitIp, exitCountry });
-
-        return true;
-      } else {
-        log.warn("Traffic verification: SOCKS connected but no valid HTTP response — NOT connected");
-        return false;
-      }
-    } catch (e: any) {
-      log.warn(`Traffic verification FAILED: ${e?.message} — NOT connected`);
+      return true;
+    } else {
+      log.warn(`Traffic verification FAILED: ${result.error || "no valid response"} — NOT connected`);
       return false;
-    } finally {
-      // Always clean up sockets
-      try { tlsSocket?.destroy(); } catch {}
-      try { socksSocket?.destroy(); } catch {}
     }
   }
 
@@ -1240,6 +1351,464 @@ function disconnectVpn(): void {
 }
 
 // ---------------------------------------------------------------------------
+// Companion control API — localhost-only HTTP server on 127.0.0.1:10810
+//
+// The BrowserWithCompanionEngine (in src/lib/emergency-connectivity/recovery-engine.ts)
+// reaches this API from the web dashboard (loaded at http://localhost:3000) to
+// drive xray-core without needing raw TCP/IPC access from the browser.
+//
+// Endpoints:
+//   GET  /api/health         → { ok, version, platform }
+//   POST /api/tunnel/start    → body { configUri } → { ok, error? }
+//   POST /api/tunnel/stop     → { ok }
+//   GET  /api/tunnel/status   → { running, exitIp, realIp }
+//   POST /api/tunnel/verify   → { trafficVerified, exitIp, realIp, latencyMs, error? }
+//
+// Security:
+//   - Binds to 127.0.0.1 ONLY (never 0.0.0.0) — no remote access
+//   - No auth (localhost-only is the auth)
+//   - configUri is NEVER logged (scrubbed before any log line)
+//   - POST bodies must be valid JSON ≤ 1MB
+//   - /tunnel/start has a 10s overall timeout
+//   - /tunnel/verify has a 15s overall timeout
+// ---------------------------------------------------------------------------
+
+// Scrub configUri from any string before logging. Matches vmess://, vless://,
+// trojan://, ss://, hysteria2://, wireguard:// schemes followed by base64/url
+// payload. The credential portion is replaced with [REDACTED].
+function scrubConfigUri(s: string): string {
+  if (!s) return s;
+  return s.replace(
+    /(vless|vmess|trojan|ss|hysteria2?|wireguard|tuic):\/\/[^\s"'<>]+/gi,
+    "$1://[REDACTED]"
+  );
+}
+
+// Start xray from a raw configUri (vmess/vless/trojan/ss). Used by the
+// companion API's /api/tunnel/start endpoint. Shares the global vpnProcess
+// variable with the desktop UI flow so the two can't double-spawn xray.
+async function startTunnelFromUri(configUri: string): Promise<{ ok: boolean; error?: string }> {
+  // Stop any existing xray process first (whether started by the API or by
+  // the desktop UI's startVpnEngine() — there is only one xray process slot).
+  if (vpnProcess) {
+    try { vpnProcess.kill("SIGTERM"); } catch {}
+    vpnProcess = null;
+  }
+  stopHealthMonitoring();
+
+  // Build the REAL config (uses real credentials from configUri, or throws)
+  let config: object;
+  try {
+    config = buildXrayConfigFromUri(configUri);
+  } catch (e: any) {
+    // Scrub just in case the error message echoes part of the URI
+    log.warn(`[companion-api] /api/tunnel/start config build failed: ${scrubConfigUri(e?.message || String(e))}`);
+    return { ok: false, error: e?.message || "Failed to build xray config from URI" };
+  }
+
+  const configPath = path.join(app.getPath("userData"), "xray-config.json");
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+  } catch (e: any) {
+    log.error(`[companion-api] Failed to write xray config: ${e?.message}`);
+    return { ok: false, error: `Failed to write xray config: ${e?.message}` };
+  }
+  log.info("[companion-api] xray config written (configUri REDACTED)");
+
+  const xrayPath = getXrayPath();
+  if (!fs.existsSync(xrayPath)) {
+    log.error(`[companion-api] xray binary not found at: ${xrayPath}`);
+    return { ok: false, error: "VPN engine binary missing (xray not bundled)" };
+  }
+
+  try {
+    vpnProcess = spawn(xrayPath, ["run", "-c", configPath], {
+      cwd: path.dirname(xrayPath),
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    vpnProcess.stdout?.on("data", (data) => {
+      log.info(`[xray] ${data.toString().trim()}`);
+    });
+    vpnProcess.stderr?.on("data", (data) => {
+      const line = data.toString().trim();
+      log.error(`[xray] ${line}`);
+    });
+    vpnProcess.on("exit", (code) => {
+      log.info(`[companion-api] xray exited with code ${code}`);
+      vpnProcess = null;
+      // If the desktop UI thought it was connected, mark it disconnected now.
+      const vpn = store.get("vpn");
+      if (vpn.connected) {
+        store.set("vpn", { ...vpn, connected: false, startedAt: null });
+        mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+      }
+    });
+
+    // Wait briefly for xray to start (so we can detect immediate crashes)
+    await new Promise((r) => setTimeout(r, 500));
+
+    if (!vpnProcess || vpnProcess.killed) {
+      return { ok: false, error: "xray process exited immediately — check config validity or xray binary" };
+    }
+
+    // Update the desktop UI state so it doesn't show "Disconnected" while
+    // the companion API is actively running a tunnel. Verification is done
+    // separately via /api/tunnel/verify.
+    const vpn = store.get("vpn");
+    store.set("vpn", {
+      ...vpn,
+      connected: false, // NOT verified yet — /api/tunnel/verify will set this
+      protocol: "companion-api",
+      startedAt: Date.now(),
+      configUri: null, // never persist the raw URI
+      exitIp: null,
+      exitCountry: null,
+    });
+    mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+
+    log.info("[companion-api] xray spawned successfully (configUri REDACTED)");
+    return { ok: true };
+  } catch (e: any) {
+    log.error(`[companion-api] Failed to spawn xray: ${e?.message}`);
+    return { ok: false, error: `Failed to spawn xray: ${e?.message}` };
+  }
+}
+
+// Stop the xray process (shared by the API and the desktop UI flow).
+async function stopTunnel(): Promise<{ ok: boolean }> {
+  log.info("[companion-api] /api/tunnel/stop — stopping xray-core…");
+  stopHealthMonitoring();
+  if (vpnProcess) {
+    try {
+      vpnProcess.kill("SIGTERM");
+      // Give it 500ms to exit gracefully
+      await new Promise((r) => setTimeout(r, 500));
+      if (!vpnProcess.killed) {
+        try { vpnProcess.kill("SIGKILL"); } catch {}
+      }
+    } catch (e: any) {
+      log.error(`[companion-api] Error killing xray: ${e?.message}`);
+    }
+    vpnProcess = null;
+  }
+  // Reflect the stopped state in the desktop UI
+  const vpn = store.get("vpn");
+  store.set("vpn", {
+    ...vpn,
+    connected: false,
+    startedAt: null,
+    exitIp: null,
+    exitCountry: null,
+  });
+  mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+  return { ok: true };
+}
+
+// Snapshot of the current tunnel state for /api/tunnel/status.
+function getTunnelStatus(): { running: boolean; exitIp: string | null; realIp: string | null } {
+  const vpn = store.get("vpn");
+  return {
+    running: !!vpnProcess && !vpnProcess.killed,
+    // Exit IP is only known after a successful /api/tunnel/verify
+    exitIp: vpn.exitIp || null,
+    // Real IP is intentionally NOT cached — it's only fetched on demand
+    // during /api/tunnel/verify. Returning null here is honest.
+    realIp: null,
+  };
+}
+
+// Verify the tunnel by doing a real HTTP request through xray's SOCKS5 proxy
+// (127.0.0.1:10808) to cloudflare/cdn-cgi/trace, AND a direct (non-proxied)
+// request to get the real IP. If they differ, traffic is going through the
+// tunnel → verified. If they match (or either is null), NOT verified.
+async function handleTunnelVerify(): Promise<{
+  trafficVerified: boolean;
+  exitIp: string | null;
+  realIp: string | null;
+  latencyMs: number | null;
+  error?: string;
+}> {
+  if (!vpnProcess || vpnProcess.killed) {
+    // Still fetch the real IP so the caller has *something* useful even
+    // when no tunnel is active — they can compare future verify calls.
+    const realIp = await fetchRealIp();
+    return {
+      trafficVerified: false,
+      exitIp: null,
+      realIp,
+      latencyMs: null,
+      error: "No active tunnel — call POST /api/tunnel/start first",
+    };
+  }
+
+  // Run both probes in parallel — they don't depend on each other.
+  const [trafficResult, realIp] = await Promise.all([
+    verifyTunnelTraffic(),
+    fetchRealIp(),
+  ]);
+
+  const exitIp = trafficResult.exitIp;
+  // Verification rule: traffic must have flowed (verified=true), AND the exit
+  // IP must differ from the real IP. If they're the same, the tunnel is
+  // leaking or xray is bypassing itself.
+  const trafficVerified =
+    trafficResult.verified &&
+    !!exitIp &&
+    !!realIp &&
+    exitIp !== realIp;
+
+  // Reflect the verified exit IP in the desktop UI state too, so the UI
+  // stays in sync with what the companion API just measured.
+  if (trafficVerified && exitIp) {
+    const vpn = store.get("vpn");
+    store.set("vpn", {
+      ...vpn,
+      connected: true,
+      exitIp,
+      exitCountry: trafficResult.exitCountry,
+    });
+    mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+    mainWindow?.webContents.send("vpn:exit-info", {
+      exitIp,
+      exitCountry: trafficResult.exitCountry,
+    });
+  }
+
+  return {
+    trafficVerified,
+    exitIp,
+    realIp,
+    latencyMs: trafficResult.latencyMs,
+    error: trafficResult.error,
+  };
+}
+
+// Parse a request body buffer as JSON. Returns null on empty or invalid JSON.
+function parseJsonBody(buf: Buffer): any | null {
+  if (!buf || buf.length === 0) return null;
+  try {
+    return JSON.parse(buf.toString("utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+// Send a JSON response. Sets CORS + Content-Type headers.
+function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(payload),
+  });
+  res.end(payload);
+}
+
+// Route a single HTTP request to the appropriate handler.
+async function handleCompanionApiRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  pathname: string,
+  bodyBuf: Buffer
+): Promise<void> {
+  // GET /api/health
+  if (pathname === "/api/health" && req.method === "GET") {
+    sendJson(res, 200, {
+      ok: true,
+      version: COMPANION_API_VERSION,
+      platform: COMPANION_API_PLATFORM,
+    });
+    return;
+  }
+
+  // POST /api/tunnel/start
+  if (pathname === "/api/tunnel/start" && req.method === "POST") {
+    const body = parseJsonBody(bodyBuf);
+    if (!body || typeof body !== "object") {
+      sendJson(res, 400, { ok: false, error: "Invalid JSON body — expected { configUri: string }" });
+      return;
+    }
+    const configUri = body.configUri;
+    if (typeof configUri !== "string" || configUri.length < 10) {
+      sendJson(res, 400, { ok: false, error: "Missing or invalid 'configUri' field (must be a string ≥ 10 chars)" });
+      return;
+    }
+
+    // Race the start against a 10s overall timeout. If xray doesn't spawn
+    // within 10s, return an error (the spawned process may still be
+    // initializing in the background — /api/tunnel/verify will catch that).
+    let result: { ok: boolean; error?: string };
+    try {
+      result = await Promise.race([
+        startTunnelFromUri(configUri),
+        new Promise<{ ok: false; error: string }>((resolve) => {
+          setTimeout(
+            () => resolve({ ok: false, error: `Tunnel start timed out after ${COMPANION_START_TIMEOUT_MS / 1000}s` }),
+            COMPANION_START_TIMEOUT_MS
+          );
+        }),
+      ]);
+    } catch (e: any) {
+      result = { ok: false, error: e?.message || "Unexpected error during tunnel start" };
+    }
+    sendJson(res, 200, result);
+    return;
+  }
+
+  // POST /api/tunnel/stop
+  if (pathname === "/api/tunnel/stop" && req.method === "POST") {
+    const result = await stopTunnel();
+    sendJson(res, 200, result);
+    return;
+  }
+
+  // GET /api/tunnel/status
+  if (pathname === "/api/tunnel/status" && req.method === "GET") {
+    const status = getTunnelStatus();
+    sendJson(res, 200, status);
+    return;
+  }
+
+  // POST /api/tunnel/verify
+  if (pathname === "/api/tunnel/verify" && req.method === "POST") {
+    let result: any;
+    try {
+      result = await Promise.race([
+        handleTunnelVerify(),
+        new Promise<any>((resolve) => {
+          setTimeout(
+            () => resolve({
+              trafficVerified: false,
+              exitIp: null,
+              realIp: null,
+              latencyMs: null,
+              error: `Tunnel verify timed out after ${COMPANION_VERIFY_TIMEOUT_MS / 1000}s`,
+            }),
+            COMPANION_VERIFY_TIMEOUT_MS
+          );
+        }),
+      ]);
+    } catch (e: any) {
+      result = {
+        trafficVerified: false,
+        exitIp: null,
+        realIp: null,
+        latencyMs: null,
+        error: e?.message || "Unexpected error during tunnel verify",
+      };
+    }
+    sendJson(res, 200, result);
+    return;
+  }
+
+  // 404
+  sendJson(res, 404, { ok: false, error: `Not found: ${req.method} ${pathname}` });
+}
+
+// Start the companion control API server on 127.0.0.1:10810.
+// Idempotent — calling it twice is a no-op.
+function startCompanionApiServer(): void {
+  if (companionApiServer) {
+    log.info("[companion-api] Already running — skipping startCompanionApiServer()");
+    return;
+  }
+
+  const server = http.createServer((req, res) => {
+    // CORS — allow the web dashboard (http://localhost:3000) and the
+    // production Next.js standalone (http://localhost:38571) to call us.
+    // Using "*" is safe here because the server is bound to 127.0.0.1 only
+    // (no remote can reach it regardless of CORS).
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    const fullUrl = new URL(
+      req.url || "/",
+      `http://${COMPANION_API_HOST}:${COMPANION_API_PORT}`
+    );
+    const pathname = fullUrl.pathname;
+
+    // Log the request line WITHOUT the query string or body — configUri
+    // lives in the body and must never appear in logs.
+    log.info(`[companion-api] ${req.method} ${pathname}`);
+
+    // Read the request body (POST only). Cap at COMPANION_MAX_BODY_BYTES
+    // to prevent memory exhaustion from oversized payloads.
+    const chunks: Buffer[] = [];
+    let aborted = false;
+    req.on("data", (chunk: Buffer) => {
+      if (aborted) return;
+      const totalSoFar = chunks.reduce((acc, c) => acc + c.length, 0);
+      if (totalSoFar + chunk.length > COMPANION_MAX_BODY_BYTES) {
+        aborted = true;
+        log.warn(`[companion-api] Request body exceeded ${COMPANION_MAX_BODY_BYTES} bytes — aborting`);
+        sendJson(res, 413, { ok: false, error: "Request body too large" });
+        try { req.destroy(); } catch {}
+        return;
+      }
+      chunks.push(chunk);
+    });
+
+    req.on("end", async () => {
+      if (aborted) return;
+      const bodyBuf = Buffer.concat(chunks);
+      try {
+        await handleCompanionApiRequest(req, res, pathname, bodyBuf);
+      } catch (e: any) {
+        log.error(`[companion-api] Unhandled error in handler: ${e?.message}`);
+        if (!res.headersSent) {
+          sendJson(res, 500, { ok: false, error: "Internal server error" });
+        }
+      }
+    });
+
+    req.on("error", (e: any) => {
+      log.warn(`[companion-api] Request stream error: ${e?.message}`);
+      if (!res.headersSent) {
+        sendJson(res, 400, { ok: false, error: "Bad request" });
+      }
+    });
+  });
+
+  server.on("error", (err: any) => {
+    if (err?.code === "EADDRINUSE") {
+      log.error(
+        `[companion-api] Port ${COMPANION_API_PORT} is already in use — ` +
+        `another Distort Desktop instance may be running. The companion control API will NOT be available.`
+      );
+    } else {
+      log.error(`[companion-api] Server error: ${err?.message}`);
+    }
+  });
+
+  server.listen(COMPANION_API_PORT, COMPANION_API_HOST, () => {
+    log.info(`Companion control API listening on http://${COMPANION_API_HOST}:${COMPANION_API_PORT}`);
+  });
+
+  companionApiServer = server;
+}
+
+// Stop the companion control API server (called on app quit).
+function stopCompanionApiServer(): void {
+  if (!companionApiServer) return;
+  try {
+    companionApiServer.closeAllConnections?.();
+  } catch {}
+  try {
+    companionApiServer.close();
+  } catch {}
+  companionApiServer = null;
+  log.info("[companion-api] Server stopped");
+}
+
+// ---------------------------------------------------------------------------
 // IPC handlers
 // ---------------------------------------------------------------------------
 ipcMain.handle("vpn:connect", async (_e, server, protocol, configUri) => {
@@ -1393,6 +1962,13 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
 
+  // Start the companion control API on 127.0.0.1:10810.
+  // This is what the BrowserWithCompanionEngine (in the web dashboard's
+  // recovery-engine.ts) reaches out to in order to spawn xray-core and
+  // verify tunnel traffic. MUST run on a different port than xray's HTTP
+  // proxy (10809) — see comment near COMPANION_API_PORT for details.
+  startCompanionApiServer();
+
   // Auto-connect on startup if enabled
   if (store.get("settings.autoConnect")) {
     setTimeout(() => quickConnect(), 1500);
@@ -1487,6 +2063,8 @@ app.on("before-quit", async (e) => {
   // CRITICAL: Always disable kill switch on quit, otherwise the user's internet
   // would be permanently blocked if the app crashed while kill switch was active.
   await disableKillSwitch();
+  // Stop the companion control API server (port 10810).
+  stopCompanionApiServer();
   if (!isQuitting) {
     isQuitting = true;
     app.quit();
@@ -1498,12 +2076,14 @@ process.on("SIGINT", async () => {
   log.info("Received SIGINT — cleaning up…");
   await stopVpnEngine();
   await disableKillSwitch();
+  stopCompanionApiServer();
   process.exit(0);
 });
 process.on("SIGTERM", async () => {
   log.info("Received SIGTERM — cleaning up…");
   await stopVpnEngine();
   await disableKillSwitch();
+  stopCompanionApiServer();
   process.exit(0);
 });
 
@@ -1513,6 +2093,7 @@ process.on("uncaughtException", async (err) => {
   try {
     await stopVpnEngine();
     await disableKillSwitch();
+    stopCompanionApiServer();
   } catch {}
   process.exit(1);
 });

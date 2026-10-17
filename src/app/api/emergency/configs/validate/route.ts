@@ -20,7 +20,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { parseConfigUri } from "@/lib/config-parser";
 import { parseUriToRealConfig } from "@/lib/real-xray-config";
 import { probeReachability } from "@/lib/anti-censor";
-import { isPrivateHost } from "@/lib/emergency-connectivity/ssrf-guard";
+import { isPrivateHost, checkSsrfSafe } from "@/lib/emergency-connectivity/ssrf-guard";
 import { isRateLimited, getClientIp } from "@/lib/emergency-connectivity/rate-limiter";
 import type {
   StructuralValidity,
@@ -139,9 +139,12 @@ export async function POST(req: NextRequest) {
 
   // Step 4: optional reachability probe
   if (probe && structural === "valid" && parsed.host && parsed.port > 0) {
-    // SSRF check — refuse to probe private/loopback/link-local addresses
-    if (isPrivateHost(parsed.host)) {
-      warnings.push(`Host ${parsed.host} is private/loopback — refusing to probe (SSRF guard).`);
+    // SSRF check — refuse to probe private/loopback/link-local addresses.
+    // Per user review issue #6: do BOTH string check AND DNS resolution check
+    // to prevent DNS rebinding attacks (where "evil.com" resolves to 127.0.0.1).
+    const ssrfCheck = await checkSsrfSafe(parsed.host);
+    if (!ssrfCheck.ok) {
+      warnings.push(ssrfCheck.reason);
       reachability = "unreachable";
     } else {
       try {

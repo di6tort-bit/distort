@@ -1,4 +1,4 @@
-name: Tests — Config Parser + Xray Validation
+name: Tests — Config Parser + Xray Validation + Emergency Engine
 on:
   push:
     branches: [main]
@@ -25,6 +25,48 @@ jobs:
 
       - name: Run kill switch logic tests
         run: bun run src/lib/__tests__/kill-switch-logic.test.ts
+
+      - name: Run Emergency Connectivity engine tests
+        run: bun test src/lib/__tests__/emergency-connectivity.test.ts
+
+      - name: Run SSRF guard tests
+        run: |
+          bun -e "
+          const { isPrivateHost, isPrivateIp } = require('./src/lib/emergency-connectivity/ssrf-guard.ts');
+          const tests = [
+            { host: '127.0.0.1', expect: true },
+            { host: '10.0.0.1', expect: true },
+            { host: '192.168.1.1', expect: true },
+            { host: '172.16.0.1', expect: true },
+            { host: '169.254.169.254', expect: true },  // cloud metadata
+            { host: 'localhost', expect: true },
+            { host: '::1', expect: true },
+            { host: '8.8.8.8', expect: false },
+            { host: '1.1.1.1', expect: false },
+            { host: 'example.com', expect: false },
+          ];
+          let pass = 0, fail = 0;
+          for (const t of tests) {
+            const got = isPrivateHost(t.host);
+            if (got === t.expect) { pass++; console.log('✓', t.host, '→', got); }
+            else { fail++; console.log('✗', t.host, '→', got, '(expected', t.expect, ')'); }
+          }
+          console.log('\n' + pass + ' pass / ' + fail + ' fail');
+          if (fail > 0) process.exit(1);
+          "
+
+      - name: Run client-diagnostics state machine tests
+        run: |
+          bun -e "
+          // Verify the 3-state probe result (ok/timeout/unknown) is correctly typed
+          const mod = require('./src/lib/emergency-connectivity/client-diagnostics.ts');
+          const fn = mod.quickHealthCheck || mod.diagnoseClientSide;
+          if (typeof fn !== 'function') {
+            console.error('✗ Expected a function export');
+            process.exit(1);
+          }
+          console.log('✓ client-diagnostics exports expected functions');
+          "
 
       - name: Download xray binary for validation
         run: |

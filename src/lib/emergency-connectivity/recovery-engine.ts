@@ -22,14 +22,18 @@
 //   - Cannot set system proxy (only chrome.proxy for the extension)
 //   - CAN: diagnose network, validate config structure, fetch plan from API,
 //     and — IF the desktop companion is running — delegate the actual
-//     tunnel to it via the local SOCKS5 proxy at 127.0.0.1:10808.
+//     tunnel to it via the companion's HTTP control API at 127.0.0.1:10810.
 //
 // DESKTOP COMPANION BRIDGE:
-//   When the Distort Desktop app is running, it exposes a local SOCKS5
-//   proxy on 127.0.0.1:10808. The browser can route fetch requests through
-//   it (via a PAC script or chrome.proxy.settings). If we detect the
-//   companion is up, we can do real tunnel verification from the browser
-//   by fetching through the SOCKS5 proxy and comparing the exit IP.
+//   When the Distort Desktop app is running, it exposes:
+//     - A local SOCKS5 proxy on 127.0.0.1:10808 (xray's inbound — used by
+//       the companion to verify tunnel traffic server-side)
+//     - A control API on 127.0.0.1:10810 (HTTP, NOT 10809 — 10809 is
+//       xray's HTTP proxy inbound, not a control API)
+//   The browser calls the control API to start/stop/verify the tunnel.
+//   The companion does the actual SOCKS5 + TLS + HTTP request through
+//   xray's proxy and reports back the exit IP (so the browser doesn't
+//   need direct SOCKS5 access, which fetch() can't do).
 //
 // WITHOUT DESKTOP COMPANION:
 //   The browser cannot actually establish a VPN tunnel. In this case, the
@@ -71,7 +75,7 @@ export type TunnelEngineResult = {
 
 // The tunnel engine adapter. Different implementations for different platforms:
 //   - BrowserWithoutCompanion: cannot connect at all — honest "install desktop app"
-//   - BrowserWithCompanion: delegates to local SOCKS5 (127.0.0.1:10808)
+//   - BrowserWithCompanion: delegates to companion control API (127.0.0.1:10810)
 //   - Desktop (Electron): spawns xray-core directly
 //   - Android: starts VpnService with libxray.so
 export interface TunnelEngine {
@@ -116,7 +120,7 @@ export class BrowserOnlyEngine implements TunnelEngine {
 }
 
 // ---------------------------------------------------------------------------
-// Browser + desktop companion engine (delegates to local SOCKS5)
+// Browser + desktop companion engine (delegates to companion control API)
 // ---------------------------------------------------------------------------
 
 export class BrowserWithCompanionEngine implements TunnelEngine {
@@ -126,30 +130,28 @@ export class BrowserWithCompanionEngine implements TunnelEngine {
 
   async connect(configUri: string, timeoutMs: number): Promise<TunnelEngineResult> {
     // The companion app (Distort Desktop) is running and exposes:
-    //   - SOCKS5 at 127.0.0.1:10808
-    //   - A control API at 127.0.0.1:10809 (HTTP)
+    //   - SOCKS5 at 127.0.0.1:10808 (xray's inbound — used by the companion
+    //     internally to verify tunnel traffic)
+    //   - A control API at 127.0.0.1:10810 (HTTP) — NOT 10809, which is
+    //     xray's HTTP proxy inbound
     //
     // Steps:
-    //   1. POST the configUri to the companion's control API
+    //   1. POST the configUri to the companion's /api/tunnel/start
     //      (it spawns xray with that config)
-    //   2. Wait for the companion to confirm xray started
-    //   3. Fetch exit IP through the SOCKS5 proxy
-    //   4. Fetch real IP directly (bypassing proxy)
-    //   5. Compare — if different, tunnel is verified
+    //   2. POST /api/tunnel/verify — the companion does a real HTTP request
+    //      through xray's SOCKS5 proxy (which fetch() can't do from a web
+    //      page) and reports back the exit IP + real IP + whether traffic
+    //      is verified.
+    //   3. If exitIp !== realIp, the tunnel is verified working.
     //
-    // BROWSER LIMITATION: fetch() cannot use a SOCKS5 proxy directly.
-    // We'd need chrome.proxy.settings (extension only) or a custom
-    // SOCKS5-over-WebSocket bridge. For the extension, this works.
-    // For the plain web app, we can only do the control API call.
-    //
-    // So in practice, this engine works ONLY in the Chrome extension context
-    // (which has chrome.proxy.settings). The web dashboard falls back to
-    // BrowserOnlyEngine.
+    // This works in BOTH the web dashboard AND the Chrome extension,
+    // because the companion does the SOCKS5 work server-side — the browser
+    // only needs to fetch() the control API (which is plain HTTP+JSON).
 
     this.running = true;
     try {
       // Step 1: tell the companion to use this config
-      const ctrlResp = await fetch("http://127.0.0.1:10809/api/tunnel/start", {
+      const ctrlResp = await fetch("http://127.0.0.1:10810/api/tunnel/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ configUri }),
@@ -178,11 +180,11 @@ export class BrowserWithCompanionEngine implements TunnelEngine {
         };
       }
 
-      // Step 2: the companion has started xray. Now we need to verify
-      // traffic flows through it. But we can't use SOCKS5 from fetch()
-      // directly in a web page. So we ask the companion to do the
-      // verification for us and report back.
-      const verifyResp = await fetch("http://127.0.0.1:10809/api/tunnel/verify", {
+      // Step 2: the companion has started xray. Now ask it to verify
+      // traffic actually flows through the tunnel. The companion does the
+      // SOCKS5+TLS+HTTP work server-side and reports back exit IP + real IP
+      // + whether they differ (trafficVerified=true).
+      const verifyResp = await fetch("http://127.0.0.1:10810/api/tunnel/verify", {
         method: "POST",
         signal: AbortSignal.timeout(timeoutMs),
       });
@@ -219,7 +221,7 @@ export class BrowserWithCompanionEngine implements TunnelEngine {
 
   async disconnect(): Promise<void> {
     try {
-      await fetch("http://127.0.0.1:10809/api/tunnel/stop", { method: "POST" });
+      await fetch("http://127.0.0.1:10810/api/tunnel/stop", { method: "POST" });
     } catch {
       // Best-effort
     }
@@ -235,7 +237,7 @@ export class BrowserWithCompanionEngine implements TunnelEngine {
 // Tries to hit the companion's health endpoint.
 export async function detectCompanion(timeoutMs = 2000): Promise<boolean> {
   try {
-    const resp = await fetch("http://127.0.0.1:10809/api/health", {
+    const resp = await fetch("http://127.0.0.1:10810/api/health", {
       signal: AbortSignal.timeout(timeoutMs),
     });
     return resp.ok;
@@ -244,17 +246,150 @@ export async function detectCompanion(timeoutMs = 2000): Promise<boolean> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Android native engine — used when running inside the Distort Android app's
+// WebView. The Android app injects a `window.DistortNative` JavascriptInterface
+// that exposes native tunnel operations. This is more secure and capable than
+// the browser-only engine: it can actually spawn xray-core via VpnService.
+//
+// The bridge is implemented in
+//   mobile/android/app/src/main/java/com/distort/app/RecoveryBridge.kt
+// and registered by DashboardWebViewActivity.kt as a JavascriptInterface named
+// "DistortNative" on the WebView that loads this dashboard.
+//
+// The bridge's connect() BLOCKS the calling (binder) thread until the VPN
+// service's verifyTrafficThroughProxy() completes (or the timeout elapses).
+// It returns a JSON string with the EXACT shape of TunnelEngineResult —
+// see RecoveryBridge.ConnectResult.toJson().
+//
+// CRITICAL HONESTY INVARIANT (preserved end-to-end):
+//   The bridge NEVER returns {started:true, trafficVerified:true} unless the
+//   underlying DistortVpnService has actually verified real traffic through
+//   the tunnel (exit IP differs from real IP via VpnService.protect()).
+//   So this engine inherits the same honesty contract as the desktop companion.
+// ---------------------------------------------------------------------------
+
+// Global declaration so TypeScript knows about the injected bridge.
+// This MUST stay in sync with RecoveryBridge.kt's @JavascriptInterface methods.
+declare global {
+  interface Window {
+    DistortNative?: {
+      // Returns "android-native" — matches TunnelEngine.platform
+      getPlatform: () => string;
+      // Whether the bridge can actually spawn a VPN tunnel (always true on Android)
+      canConnect: () => boolean;
+      // Start a tunnel with the given config URI; returns JSON TunnelEngineResult.
+      // BLOCKS until verification completes or timeout elapses.
+      connect: (configUri: string, timeoutMs: number) => string;
+      // Stop the current tunnel (returns true if a stop signal was sent)
+      disconnect: () => boolean;
+      // Live status — does NOT block
+      isRunning: () => boolean;
+      // Current verified exit IP (empty string if not connected)
+      getExitIp: () => string;
+    };
+  }
+}
+
+export class AndroidNativeEngine implements TunnelEngine {
+  readonly platform = "android-native";
+  readonly canConnect = true;
+
+  async connect(configUri: string, timeoutMs: number): Promise<TunnelEngineResult> {
+    if (typeof window === "undefined" || !window.DistortNative) {
+      // Should never happen — createTunnelEngine() only returns this engine
+      // when window.DistortNative is present. But be defensive.
+      return {
+        started: false,
+        trafficVerified: false,
+        exitIp: null,
+        realIp: null,
+        error: "Android native bridge not available (window.DistortNative undefined)",
+        latencyMs: null,
+      };
+    }
+    try {
+      // The bridge call BLOCKS the binder thread until verification completes
+      // (or the timeout fires). We don't need an additional JS-side timeout —
+      // the bridge implements it via CountDownLatch.await(timeoutMs).
+      const resultJson = window.DistortNative.connect(configUri, timeoutMs);
+      const result = JSON.parse(resultJson) as {
+        started: boolean;
+        trafficVerified: boolean;
+        exitIp: string | null;
+        realIp: string | null;
+        error: string | null;
+        latencyMs: number | null;
+      };
+      return result;
+    } catch (e) {
+      const err = e as Error;
+      return {
+        started: false,
+        trafficVerified: false,
+        exitIp: null,
+        realIp: null,
+        error: `Android bridge call failed: ${err.message}`,
+        latencyMs: null,
+      };
+    }
+  }
+
+  async disconnect(): Promise<void> {
+    if (typeof window !== "undefined" && window.DistortNative) {
+      try {
+        window.DistortNative.disconnect();
+      } catch {
+        // Best-effort — the engine state will be cleaned up by the next
+        // connect() or by the service stopping itself.
+      }
+    }
+  }
+
+  isRunning(): boolean {
+    if (typeof window !== "undefined" && window.DistortNative) {
+      try {
+        return window.DistortNative.isRunning();
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+}
+
 // Factory: pick the right engine for the current context.
+//
+// Priority order:
+//   1. Android native bridge (window.DistortNative) — highest priority.
+//      The Android app's WebView injects this; if present, we can actually
+//      spawn xray via VpnService.
+//   2. Desktop companion (Distort Desktop app at 127.0.0.1:10810).
+//      The browser calls the companion's HTTP control API, which spawns xray
+//      and verifies tunnel traffic server-side (since fetch() can't use
+//      SOCKS5 directly from a web page).
+//   3. Browser-only (honest "cannot connect"). The web dashboard alone
+//      can diagnose and validate configs, but cannot establish a tunnel.
 export async function createTunnelEngine(): Promise<TunnelEngine> {
   // Only run this in the browser
   if (typeof window === "undefined") {
     // Server-side rendering — return a no-op engine
     return new BrowserOnlyEngine();
   }
+
+  // 1. Check for Android native bridge first (highest priority)
+  if (window.DistortNative) {
+    return new AndroidNativeEngine();
+  }
+
+  // 2. Check for desktop companion
   const companionUp = await detectCompanion();
-  return companionUp
-    ? new BrowserWithCompanionEngine()
-    : new BrowserOnlyEngine();
+  if (companionUp) {
+    return new BrowserWithCompanionEngine();
+  }
+
+  // 3. Fall back to browser-only (honest "cannot connect")
+  return new BrowserOnlyEngine();
 }
 
 // ---------------------------------------------------------------------------
@@ -476,7 +611,53 @@ export class RecoveryEngine {
       }
 
       // Engine CAN connect — try it
-      const result = await this.engine.connect(candidate.configUri, plan.policy.verifyTimeoutMs);
+      // First, fetch the configUri on-demand (not pre-fetched in the plan)
+      // Type is `string | null` because fetchCandidateUri() can return null
+      // (rate-limited, auth failed, not found) — and we need to distinguish
+      // "not fetched" from "fetched an empty URI".
+      let configUri: string | null = candidate.configUri;
+      if (!configUri && candidate.id !== "satellite-stub-vip") {
+        // Remote candidate — fetch URI from secure endpoint
+        configUri = await this.fetchCandidateUri(candidate.id);
+        if (!configUri) {
+          // Could not fetch URI (rate limited, auth failed, or not found)
+          // Skip this candidate — don't claim "connected"
+          this.emit({
+            type: "verification-failed",
+            reason: "Could not fetch config URI for this candidate (rate limited, auth required, or not found).",
+          });
+
+          this.logAttempt({
+            planId: plan.planId,
+            candidateId: candidate.id,
+            candidateLabel: candidate.label,
+            attemptNumber,
+            state: "recovering",
+            result: "failure",
+            reason: "Config URI fetch failed — skipped.",
+            latencyMs: null,
+            startedAt: attemptStart,
+            endedAt: new Date().toISOString(),
+          });
+
+          await markFailed(candidate.id);
+
+          const next = plan.candidates[i + 1];
+          if (next) {
+            await this.delay(1500);
+            this.emit({ type: "next-candidate-available", candidate: next });
+            continue;
+          } else {
+            this.emit({
+              type: "no-candidates-left",
+              reason: `All ${plan.candidates.length} candidates tried. Could not fetch URI for remote candidates (rate limited or auth required).`,
+            });
+            break;
+          }
+        }
+      }
+
+      const result = await this.engine.connect(configUri || "", plan.policy.verifyTimeoutMs);
 
       if (result.started && result.trafficVerified && result.exitIp !== result.realIp) {
         // SUCCESS — tunnel verified, traffic flows, exit IP differs from real IP
@@ -591,40 +772,27 @@ export class RecoveryEngine {
     }
 
     // 2. Remote configs (from API — only if internet is up)
+    // SECURITY: We fetch the PLAN (metadata only, no configUri) from
+    // /api/emergency/plan. The configUri is fetched separately per-candidate
+    // via POST /api/emergency/candidates/[id]/uri, which is rate-limited and
+    // (in production) authenticated. This prevents mass credential harvesting.
     if (this.fetchRemote && diagnosis.internationalReachable) {
       try {
-        const resp = await fetch("/api/imported-configs?bucket=optimized&limit=20");
+        const resp = await fetch("/api/emergency/plan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userTier: "free" }),
+        });
         if (resp.ok) {
-          const data = await resp.json() as { configs: Array<{
-            id: string;
-            protocol: string;
-            uri: string;
-            label: string | null;
-            host: string;
-            port: number;
-            score: number;
-            flags: string;
-            country: string | null;
-          }> };
-          for (const cfg of data.configs) {
+          const data = await resp.json() as RecoveryPlan;
+          for (const cfg of data.candidates) {
             // Don't duplicate configs we already have locally
             if (candidates.some((c) => c.id === cfg.id)) continue;
-            const flagsArray = cfg.flags ? cfg.flags.split(",").filter(Boolean) : [];
             candidates.push({
-              id: cfg.id,
-              label: cfg.label || `${cfg.protocol} ${cfg.host}:${cfg.port}`,
-              protocol: cfg.protocol as TransportType,
-              host: cfg.host,
-              port: cfg.port,
-              stealth: flagsArray.some((f) => ["Reality", "TLS", "SNI", "Vision"].includes(f)),
-              antiDpiScore: cfg.score,
-              exitCountry: cfg.country,
-              vipOnly: false,
-              configUri: cfg.uri,
-              lastProbe: null,
-              successStreak: 0,
-              failureStreak: 0,
-              lastTriedAt: null,
+              ...cfg,
+              // configUri is empty in the plan response — will be fetched
+              // on-demand when this candidate is actually tried
+              configUri: "",
             });
           }
         }
@@ -634,6 +802,23 @@ export class RecoveryEngine {
     }
 
     return candidates;
+  }
+
+  // Fetch the configUri for a candidate from the secure endpoint.
+  // Called on-demand right before the engine tries to connect — never pre-fetched.
+  // Returns null if the fetch fails (candidate is skipped).
+  private async fetchCandidateUri(candidateId: string): Promise<string | null> {
+    try {
+      const resp = await fetch(`/api/emergency/candidates/${candidateId}/uri`, {
+        method: "POST",
+        // credentials: 'same-origin' is the default — session cookie (if any) is sent
+      });
+      if (!resp.ok) return null;
+      const data = await resp.json() as { uri?: string };
+      return data.uri || null;
+    } catch {
+      return null;
+    }
   }
 
   private storedToCandidate(cfg: StoredConfig): CandidatePath {
@@ -666,6 +851,11 @@ export class RecoveryEngine {
         return;
       }
       const health = await quickHealthCheck(3000);
+      if (health.unknown) {
+        // Ambiguous result — don't trigger recovery, just log.
+        // Recovery on "unknown" would cause false-positive disconnects.
+        return;
+      }
       if (!health.online) {
         // Network dropped — trigger recovery
         this.emit({ type: "quality-dropped" });
