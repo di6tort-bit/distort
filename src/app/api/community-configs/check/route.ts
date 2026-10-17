@@ -1,8 +1,10 @@
 // DISTORT — /api/community-configs/check
 // POST: probe every community config, update reach + checkedAt, return list.
+// PROTECTED: requires API key (modifies DB state for all configs)
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { checkAuth } from "@/lib/auth";
 import { probeReachability } from "@/lib/anti-censor";
 
 // Parse host:port out of the various VPN URI schemes (trojan/vless/vmess/ss).
@@ -68,7 +70,9 @@ function splitHostPort(s: string): { host: string; port: number } | null {
   return { host, port };
 }
 
-export async function POST() {
+export async function POST(req: NextRequest) {
+  const authFail = checkAuth(req);
+  if (authFail) return authFail;
   try {
     const configs = await db.communityConfig.findMany();
 

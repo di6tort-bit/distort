@@ -221,16 +221,34 @@ export default function AdminPanel() {
               <DistortLogo size={64} />
             </div>
             <h1 className="font-display text-2xl font-extrabold text-center text-white mb-2">DISTORT Admin</h1>
-            <p className="text-center text-sm text-muted-foreground mb-6">Sign in with your admin email</p>
+            <p className="text-center text-sm text-muted-foreground mb-6">Sign in with your admin credentials</p>
             <div className="space-y-3">
-              <Input
-                type="email"
-                placeholder="admin@distort.app"
-                value={adminEmail}
-                onChange={(e) => setAdminEmail(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && checkAdmin()}
-                className="bg-white/[0.04] border-white/10"
-              />
+              <div className="space-y-1.5">
+                <Label className="text-xs font-tech uppercase tracking-wider text-muted-foreground">Admin Email</Label>
+                <Input
+                  type="email"
+                  placeholder="admin@distort.app"
+                  value={adminEmail}
+                  onChange={(e) => setAdminEmail(e.target.value)}
+                  className="bg-white/[0.04] border-white/10"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs font-tech uppercase tracking-wider text-muted-foreground">API Key</Label>
+                <Input
+                  type="password"
+                  placeholder="Enter your DISTORT_API_KEY"
+                  onChange={(e) => {
+                    const key = e.target.value;
+                    if (key) localStorage.setItem("distort_api_key", key);
+                    else localStorage.removeItem("distort_api_key");
+                  }}
+                  className="bg-white/[0.04] border-white/10 font-mono text-xs"
+                />
+                <p className="text-[10px] text-muted-foreground/70">
+                  Required in production. Leave empty for local dev (no DISTORT_API_KEY set).
+                </p>
+              </div>
               <Button onClick={checkAdmin} className="w-full bg-brand-gradient text-[#02131a] hover:opacity-90 font-tech uppercase tracking-wider">
                 <Shield className="w-4 h-4 mr-2" /> Access Admin Panel
               </Button>
