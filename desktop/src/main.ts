@@ -570,15 +570,13 @@ async function enableKillSwitch(): Promise<void> {
     const { exec } = require("child_process") as { exec: (cmd: string, cb: (e: any, o: string, e2: string) => void) => void };
 
     // Get the VPN server IP so we can EXCLUDE it from the block rule.
-    // This is critical: if we block the VPN server too, the tunnel can't
-    // reconnect and the user is stuck with no internet.
     const vpnServer = store.get("vpn.server") as { host?: string } | null;
     const vpnHost = vpnServer?.host || "";
     let vpnIp = "";
     if (vpnHost) {
       try {
-        const { lookup } = require("dns").promises || require("dns");
-        const addresses = await (require("dns").promises?.lookup(vpnHost, { all: true }) || Promise.resolve([]));
+        const dnsPromises = require("dns").promises;
+        const addresses = await dnsPromises.lookup(vpnHost, { all: true });
         if (Array.isArray(addresses) && addresses.length > 0) {
           vpnIp = addresses[0].address;
           log.info(`Kill switch: VPN server ${vpnHost} resolves to ${vpnIp} — will be excluded from block`);
@@ -588,8 +586,38 @@ async function enableKillSwitch(): Promise<void> {
       }
     }
 
-    // Add a block-all rule for outbound traffic, EXCLUDING the VPN server.
-    // We use a "block all" rule, then add a separate "allow" rule for the VPN server.
+    // CRITICAL FIX: On Windows Firewall, Block rules have HIGHER priority than Allow rules
+    // when they have the same scope. To properly exclude the VPN server, we must use
+    // a block rule with a SCOPE that excludes the VPN server IP.
+    // Approach: Create a block rule for all IPs EXCEPT the VPN server.
+    // netsh doesn't support "block all except X" directly, so we use:
+    //   1. Block rule for 0.0.0.0-<vpn_ip_minus_1> and <vpn_ip_plus_1>-255.255.255.255
+    //   2. This is complex, so instead we use a simpler approach:
+    //      - Block ALL outbound
+    //      - Add an Allow rule with HIGHER priority (lower rule index) for the VPN IP
+    //   Windows Firewall processes rules in order, and the FIRST matching rule wins.
+    //   So we add the Allow rule FIRST, then the Block rule.
+
+    // Step 1: Add Allow rule for VPN server (must be added BEFORE the block rule)
+    if (vpnIp) {
+      await new Promise<void>((resolve) => {
+        exec(
+          `netsh advfirewall firewall add rule name="DISTORT-KillSwitch-AllowVPN" dir=out action=allow remoteip=${vpnIp} enable=yes`,
+          (err) => {
+            if (err) {
+              log.warn(`Kill switch: could not add VPN allow rule: ${err.message}`);
+            } else {
+              log.info(`Kill switch: VPN server ${vpnIp} allow rule added (higher priority)`);
+            }
+            resolve();
+          }
+        );
+      });
+    }
+
+    // Step 2: Add Block rule for ALL outbound traffic
+    // This rule will NOT match the VPN server because the Allow rule was added first
+    // and Windows processes rules in order (first match wins).
     await new Promise<void>((resolve) => {
       exec(
         'netsh advfirewall firewall add rule name="DISTORT-KillSwitch-Block" dir=out action=block enable=yes',
@@ -599,28 +627,26 @@ async function enableKillSwitch(): Promise<void> {
             resolve();
             return;
           }
-          log.info("Kill switch: outbound traffic blocked");
+          log.info("Kill switch: outbound traffic blocked (VPN server excluded)");
+          killSwitchActive = true;
+          mainWindow?.webContents.send("vpn:kill-switch-activated");
+          resolve();
+        }
+      );
+    });
 
-          // Add an ALLOW rule for the VPN server IP so the tunnel can reconnect
-          if (vpnIp) {
-            exec(
-              `netsh advfirewall firewall add rule name="DISTORT-KillSwitch-AllowVPN" dir=out action=allow remoteip=${vpnIp} enable=yes`,
-              (err2) => {
-                if (err2) {
-                  log.warn(`Kill switch: could not add VPN allow rule: ${err2.message}`);
-                } else {
-                  log.info(`Kill switch: VPN server ${vpnIp} excluded from block`);
-                }
-                killSwitchActive = true;
-                mainWindow?.webContents.send("vpn:kill-switch-activated");
-                resolve();
-              }
-            );
+    // Step 3: VERIFY the rules actually exist (don't just trust exit code)
+    await new Promise<void>((resolve) => {
+      exec(
+        'netsh advfirewall firewall show rule name="DISTORT-KillSwitch-Block"',
+        (err, stdout) => {
+          if (err || !stdout.includes("DISTORT-KillSwitch-Block")) {
+            log.error("Kill switch: VERIFICATION FAILED — block rule not found after creation!");
+            killSwitchActive = false;
           } else {
-            killSwitchActive = true;
-            mainWindow?.webContents.send("vpn:kill-switch-activated");
-            resolve();
+            log.info("Kill switch: VERIFIED — block rule is active");
           }
+          resolve();
         }
       );
     });

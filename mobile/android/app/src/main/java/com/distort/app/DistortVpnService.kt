@@ -150,16 +150,20 @@ class DistortVpnService : VpnService() {
             val exitIp = fetchIpThroughProxy(proxy, "https://www.cloudflare.com/cdn-cgi/trace")
             if (exitIp == null) {
                 Log.e(TAG, "Traffic verification: could not fetch exit IP through proxy")
-                return checkSocksPortOnly()
+                // NO FALLBACK — if we can't get traffic through the proxy, we
+                // are NOT connected. Do not assume connected just because SOCKS
+                // port is open.
+                return false
             }
             Log.i(TAG, "Traffic verification: exit IP = $exitIp")
 
             // 2. Get real IP using a PROTECTED socket (bypasses VPN)
             val realIp = getRealPublicIpProtected()
             if (realIp == null) {
-                Log.w(TAG, "Could not fetch real public IP (protected) — can't verify leak")
-                // Can't verify leak, but proxy works — assume connected
-                return true
+                // CRITICAL: If we can't get the real IP, we CANNOT verify there's no leak.
+                // Do NOT assume connected — return false to be safe.
+                Log.e(TAG, "Traffic verification: could not fetch real IP — cannot verify no leak, NOT marking as connected")
+                return false
             }
             Log.i(TAG, "Traffic verification: real IP (protected) = $realIp")
 
@@ -174,7 +178,8 @@ class DistortVpnService : VpnService() {
             true
         } catch (e: Exception) {
             Log.e(TAG, "Traffic verification failed: ${e.message}")
-            checkSocksPortOnly()
+            // NO FALLBACK — any verification failure means we are NOT connected.
+            return false
         }
     }
 
@@ -198,18 +203,12 @@ class DistortVpnService : VpnService() {
         }
     }
 
-    private fun checkSocksPortOnly(): Boolean {
-        return try {
-            val socket = java.net.Socket()
-            socket.connect(java.net.InetSocketAddress("127.0.0.1", 10808), 2000)
-            socket.close()
-            Log.w(TAG, "SOCKS port open but couldn't verify traffic — assuming connected (weak check)")
-            true
-        } catch (e2: Exception) {
-            Log.e(TAG, "SOCKS port not reachable: ${e2.message}")
-            false
-        }
-    }
+    // NOTE: checkSocksPortOnly() has been REMOVED.
+    // Previously, if HTTP verification failed, we'd fall back to checking if
+    // the SOCKS port was open — and assume connected. This was dishonest
+    // because an open port only means xray's inbound is ready, NOT that
+    // traffic can actually flow to the destination server.
+    // Now, any verification failure → NOT connected.
 
     /**
      * Get the device's REAL public IP using a socket that BYPASSES the VPN tunnel.
