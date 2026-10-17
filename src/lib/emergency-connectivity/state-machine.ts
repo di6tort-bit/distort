@@ -65,6 +65,10 @@ export function nextState(current: RecoveryState, event: RecoveryEvent): Recover
     case "diagnosing":
       if (event.type === "diagnosis-complete") return "selecting";
       if (event.type === "no-base-network") return "exhausted";
+      // If the diagnosis reveals that no candidates can be gathered (no local
+      // configs + international blocked so the API is unreachable), fail
+      // closed immediately rather than getting stuck in "diagnosing".
+      if (event.type === "no-candidates-left") return "exhausted";
       if (event.type === "reset" || event.type === "abort") return "idle";
       return null;
 

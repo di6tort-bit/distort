@@ -217,6 +217,8 @@ export type RecoveryAttempt = {
   planId: string;
   // Which candidate was tried
   candidateId: string;
+  // Display label of the candidate (NO credentials — for log readability)
+  candidateLabel?: string;
   // Index of this attempt (1-based)
   attemptNumber: number;
   // State machine state when this attempt was made

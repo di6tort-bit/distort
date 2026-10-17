@@ -1,15 +1,28 @@
 'use client';
 
-// DISTORT — Emergency Connectivity UI view
+// DISTORT — Emergency Connectivity UI view (engine-driven rewrite)
 //
-// Per design §7: exposes the Emergency Connectivity engine to the user.
-// Honesty surface: the server cannot verify reachability from the user's
-// device — the client (desktop/Android) must probe each candidate itself.
-// This view shows: honesty banner, network diagnosis, recovery state
-// machine badge, candidate paths (NO credentials), recovery log, manual
-// actions (Recover / Import / Reset), and the Starlink/VIP notice.
+// This view is the HONEST surface for the Distort recovery engine. It does NOT
+// just render a server-built plan — it actually drives the real client-side
+// `RecoveryEngine` (from src/lib/emergency-connectivity/recovery-engine.ts):
+//
+//   1. On mount: detects whether the Distort Desktop companion is running at
+//      127.0.0.1:10809, loads local configs from IndexedDB, and runs an initial
+//      client-side network diagnosis (real probes to 1.1.1.1 / cloudflare / iran.ir).
+//   2. When the user clicks "Recover Connection", we instantiate a RecoveryEngine
+//      with an `onStatusChange` callback that mirrors the engine's status into
+//      React state. Every state-machine transition (idle → diagnosing → selecting
+//      → connecting → verifying → connected | recovering | exhausted) and every
+//      attempt log fires the callback, so the UI updates LIVE.
+//   3. The "Connected" state is ONLY shown when the engine's real verification
+//      succeeded — exit IP differs from real IP. We never fake it.
+//   4. Browser-only engine honesty: if no desktop companion is detected, the
+//      engine reports "browser-only" and every candidate attempt fails with a
+//      clear "Install the Desktop app" reason. The diagnosis + config validation
+//      still work, so when the user installs the companion, the engine knows
+//      which paths to use first.
 
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -36,47 +49,49 @@ import {
   Globe,
   Radio,
   ShieldCheck,
-  Satellite,
-  Zap,
   RefreshCw,
   Upload,
   RotateCcw,
-  Crown,
-  Server as ServerIcon,
   Wifi,
   Network,
+  Zap,
+  Power,
+  Ban,
+  Trash2,
+  XCircle,
+  MonitorSmartphone,
 } from "lucide-react";
 import { toast } from "sonner";
-import { useFetch, postJSON } from "@/hooks/use-fetch";
-import type { ServerLite } from "@/lib/vpn-store";
+import { postJSON } from "@/hooks/use-fetch";
+
+import { RecoveryEngine, detectCompanion } from "@/lib/emergency-connectivity/recovery-engine";
+import { diagnoseClientSide } from "@/lib/emergency-connectivity/client-diagnostics";
 import {
+  getAllConfigs,
+  addConfig,
+  deleteConfig,
+  wipeAllConfigs,
+  type StoredConfig,
+} from "@/lib/emergency-connectivity/local-config-store";
+import { idleStatus } from "@/lib/emergency-connectivity/state-machine";
+import type {
+  RecoveryStatus,
   RecoveryState,
-  RecoveryPlan,
-  RecoveryPolicy,
   CandidatePath,
   RecoveryAttempt,
-  RECOVERY_STATE_LABELS,
-  ValidateConfigResponse,
+  NetworkDiagnosis,
+  BaseNetworkStatus,
   StructuralValidity,
   ServerReachability,
   TunnelVerification,
   TransportType,
+  ValidateConfigResponse,
 } from "@/lib/emergency-connectivity/types";
+import { RECOVERY_STATE_LABELS } from "@/lib/emergency-connectivity/types";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-const DEFAULT_EMAIL = "founder@distort.app";
-
-function getUserEmail(): string {
-  if (typeof window === "undefined") return DEFAULT_EMAIL;
-  try {
-    return window.localStorage.getItem("distortEmail") || DEFAULT_EMAIL;
-  } catch {
-    return DEFAULT_EMAIL;
-  }
-}
 
 const PROTOCOL_LABEL: Record<TransportType, string> = {
   wireguard: "WireGuard",
@@ -109,31 +124,15 @@ function protocolColor(p: TransportType): string {
   }
 }
 
-function confidenceColor(c: RecoveryPlan["confidence"]): string {
-  switch (c) {
-    case "high":
-      return "#10d9a0";
-    case "medium":
-      return "#00f0ff";
-    case "low":
-      return "#ffb020";
-    case "none":
-    default:
-      return "#ff4d6d";
-  }
-}
-
-// Structural validity → label + color
 function structuralBadge(s: StructuralValidity): { label: string; color: string } {
   switch (s) {
     case "valid":
       return { label: "STRUCT", color: "#10d9a0" };
     case "invalid-syntax":
+    case "unsupported-protocol":
       return { label: "STRUCT", color: "#ff4d6d" };
     case "missing-fields":
       return { label: "STRUCT", color: "#ffb020" };
-    case "unsupported-protocol":
-      return { label: "STRUCT", color: "#ff4d6d" };
     default:
       return { label: "STRUCT", color: "#8aa0c4" };
   }
@@ -156,7 +155,6 @@ function tunnelBadge(t: TunnelVerification): { label: string; color: string } {
     case "verified":
       return { label: "TUNNEL", color: "#10d9a0" };
     case "traffic-failed":
-      return { label: "TUNNEL", color: "#ff4d6d" };
     case "leak-detected":
       return { label: "TUNNEL", color: "#ff4d6d" };
     case "not-attempted":
@@ -172,6 +170,32 @@ function scoreColor(score: number): string {
   return "#8aa0c4";
 }
 
+function baseNetworkColor(s: BaseNetworkStatus): string {
+  switch (s) {
+    case "online":
+      return "#10d9a0";
+    case "local-only":
+      return "#ffb020";
+    case "offline":
+      return "#ff4d6d";
+    default:
+      return "#8aa0c4";
+  }
+}
+
+function baseNetworkLabel(s: BaseNetworkStatus): string {
+  switch (s) {
+    case "online":
+      return "online";
+    case "local-only":
+      return "local-only";
+    case "offline":
+      return "offline";
+    default:
+      return "unknown";
+  }
+}
+
 function formatTime(iso: string): string {
   try {
     return new Date(iso).toLocaleTimeString(undefined, {
@@ -184,67 +208,38 @@ function formatTime(iso: string): string {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Status response shape (from /api/emergency/status). The server returns the
-// managed server pool + capability flags + notice — it does NOT return a
-// live diagnosis because the server cannot probe from the user's device.
-// The diagnosis comes back WITH the plan from /api/emergency/plan.
-// ---------------------------------------------------------------------------
-
-type ManagedServerLite = {
-  id: string;
-  code: string;
-  country: string;
-  city: string;
-  flag: string;
-  host: string;
-  port: number;
-  online: boolean;
-  ping: number;
-  load: number;
-  stealth: boolean;
-};
-
-type EmergencyStatusResponse = {
-  policy?: RecoveryPolicy;
-  managedServers?: ManagedServerLite[];
-  capabilities?: {
-    satelliteAvailable: boolean;
-    provisioningAvailable: boolean;
-  };
-  notice?: string;
-};
-
-type VipCheckResponse = {
-  vip: boolean;
-  tier: "free" | "vip" | "admin" | "none";
-  isAdmin?: boolean;
-  vipUntil?: string | null;
-  message?: string;
-};
+// Local StoredConfig ids are generated with the "cfg_" prefix in local-config-store.ts.
+// Remote candidates from /api/imported-configs use UUIDs.
+function isLocalCandidate(id: string): boolean {
+  return id.startsWith("cfg_");
+}
 
 // ---------------------------------------------------------------------------
-// Component
+// Main component
 // ---------------------------------------------------------------------------
 
 export function EmergencyConnectivityView() {
-  // User / tier state
-  const [userEmail, setUserEmail] = useState<string>(DEFAULT_EMAIL);
-  const [userTier, setUserTier] = useState<"free" | "vip" | "admin">("free");
-  const [tierLoaded, setTierLoaded] = useState(false);
+  // Engine + companion detection
+  const engineRef = useRef<RecoveryEngine | null>(null);
+  const [enginePlatform, setEnginePlatform] = useState<
+    "browser-only" | "browser-with-companion" | "detecting"
+  >("detecting");
+  const [companionDetected, setCompanionDetected] = useState(false);
 
-  // Recovery state (client-side visual until Phase 3 ships execution)
-  const [recoveryState, setRecoveryState] = useState<RecoveryState>("idle");
-  const [activePlan, setActivePlan] = useState<RecoveryPlan | null>(null);
-  const [attempts, setAttempts] = useState<RecoveryAttempt[]>([]);
-  const [lastStateChangeAt, setLastStateChangeAt] = useState<string>(
-    new Date().toISOString()
-  );
+  // Live engine status — mirrored from onStatusChange
+  const [status, setStatus] = useState<RecoveryStatus>(() => idleStatus());
 
-  // Recovery action flags
-  const [planning, setPlanning] = useState(false);
-  const [planError, setPlanError] = useState<string | null>(null);
-  const [includeSatellite, setIncludeSatellite] = useState(false);
+  // Independent client-side diagnosis (not tied to the engine — user can re-probe)
+  const [diagnosis, setDiagnosis] = useState<NetworkDiagnosis | null>(null);
+  const [diagnosing, setDiagnosing] = useState(false);
+
+  // Local config store (IndexedDB)
+  const [localConfigs, setLocalConfigs] = useState<StoredConfig[]>([]);
+
+  // Recovery cycle running flag (separate from engine state — gives UI a hard
+  // "engine.recover() hasn't resolved yet" signal even if state goes idle in
+  // between)
+  const [cycleRunning, setCycleRunning] = useState(false);
 
   // Import dialog state
   const [importOpen, setImportOpen] = useState(false);
@@ -254,98 +249,204 @@ export function EmergencyConnectivityView() {
   const [validation, setValidation] = useState<ValidateConfigResponse | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
 
-  // Managed servers (from /api/servers — always exists)
-  const serversState = useFetch<{ servers: ServerLite[] }>("/api/servers");
-  const serverList = serversState.data?.servers ?? [];
+  // Wipe-all confirmation
+  const [wipeConfirming, setWipeConfirming] = useState(false);
 
-  // Emergency status (from /api/emergency/status — may 404 during beta)
-  const statusState = useFetch<EmergencyStatusResponse>("/api/emergency/status");
-
-  // ---------------------------------------------------------------------------
-  // Tier check on mount
-  // ---------------------------------------------------------------------------
-
+  // -------------------------------------------------------------------------
+  // On mount: detect companion, load local configs, run initial diagnosis
+  // -------------------------------------------------------------------------
   useEffect(() => {
-    const email = getUserEmail();
-    setUserEmail(email);
     let cancelled = false;
-    (async () => {
+
+    async function bootstrap() {
+      // 1. Detect desktop companion (controls whether real tunneling is available)
       try {
-        const r = await fetch(
-          `/api/vip/check?email=${encodeURIComponent(email)}`,
-          { headers: { "x-user-email": email } }
-        );
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const data = (await r.json()) as VipCheckResponse;
+        const up = await detectCompanion(2000);
         if (cancelled) return;
-        const tier = data.isAdmin
-          ? "admin"
-          : data.tier === "vip"
-          ? "vip"
-          : "free";
-        setUserTier(tier);
-        if (tier !== "free") {
-          // Default ON for VIP/admin — they paid for it
-          setIncludeSatellite(true);
-        }
+        setCompanionDetected(up);
+        setEnginePlatform(up ? "browser-with-companion" : "browser-only");
       } catch {
         if (cancelled) return;
-        // Default to free if the check fails — fail closed (no VIP)
-        setUserTier("free");
-      } finally {
-        if (!cancelled) setTierLoaded(true);
+        setCompanionDetected(false);
+        setEnginePlatform("browser-only");
       }
-    })();
+
+      // 2. Load local configs from IndexedDB (offline-available)
+      try {
+        const cfgs = await getAllConfigs();
+        if (cancelled) return;
+        setLocalConfigs(cfgs);
+      } catch {
+        // IndexedDB not available — local configs just won't show
+      }
+
+      // 3. Run an initial client-side diagnosis so the user sees something real
+      // immediately, without having to click Recover first.
+      runDiagnose();
+    }
+
+    bootstrap();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  // ---------------------------------------------------------------------------
-  // Actions
-  // ---------------------------------------------------------------------------
-
-  const handleRecover = useCallback(async () => {
-    setPlanError(null);
-    setPlanning(true);
-    setRecoveryState("diagnosing");
-    setLastStateChangeAt(new Date().toISOString());
+  // Refresh local config list helper (called after add/delete/wipe)
+  const refreshLocalConfigs = useCallback(async () => {
     try {
-      const r = await postJSON<RecoveryPlan>("/api/emergency/plan", {
-        includeSatellite: includeSatellite && userTier !== "free",
-        includeVip: userTier !== "free",
-        userTier,
-        userEmail,
-      });
-      setActivePlan(r);
-      setRecoveryState("selecting");
-      setLastStateChangeAt(new Date().toISOString());
-      const n = r.candidates?.length ?? 0;
-      toast.success("Recovery plan ready", {
-        description: `${n} candidate${n === 1 ? "" : "s"} · confidence ${r.confidence}`,
-      });
-    } catch (e) {
-      const msg = (e as Error).message || "Plan request failed";
-      setPlanError(msg);
-      setRecoveryState("idle");
-      setLastStateChangeAt(new Date().toISOString());
-      toast.error("Could not build recovery plan", {
-        description: `${msg} — the Emergency API may still be in beta.`,
-      });
-    } finally {
-      setPlanning(false);
+      const cfgs = await getAllConfigs();
+      setLocalConfigs(cfgs);
+    } catch {
+      setLocalConfigs([]);
     }
-  }, [includeSatellite, userTier, userEmail]);
-
-  const handleReset = useCallback(() => {
-    setRecoveryState("idle");
-    setActivePlan(null);
-    setAttempts([]);
-    setPlanError(null);
-    setLastStateChangeAt(new Date().toISOString());
-    toast.info("Recovery state reset");
   }, []);
 
+  // -------------------------------------------------------------------------
+  // Diagnose network (real client-side probes)
+  // -------------------------------------------------------------------------
+  const runDiagnose = useCallback(async () => {
+    setDiagnosing(true);
+    try {
+      const d = await diagnoseClientSide();
+      setDiagnosis(d);
+    } catch (e) {
+      toast.error("Diagnosis failed", {
+        description: (e as Error).message || "Could not probe the network from the browser.",
+      });
+    } finally {
+      setDiagnosing(false);
+    }
+  }, []);
+
+  // -------------------------------------------------------------------------
+  // Recover Connection — drive the real engine
+  // -------------------------------------------------------------------------
+  const handleRecover = useCallback(async () => {
+    if (cycleRunning) return;
+    setCycleRunning(true);
+
+    try {
+      // Create a fresh engine instance for this cycle (the previous one may
+      // have stopped monitoring). Wire onStatusChange to mirror into React.
+      const engine = new RecoveryEngine({
+        onStatusChange: (next) => {
+          setStatus(next);
+        },
+      });
+      engineRef.current = engine;
+
+      await engine.init();
+      // After init, the engine has picked BrowserOnly or BrowserWithCompanion.
+      // We don't read it directly (private field), but the attempts' reason
+      // string will reveal it. We already detected the companion on mount, so
+      // our `enginePlatform` state is the source of truth for the badge.
+
+      await engine.recover();
+
+      const finalStatus = engine.getStatus();
+      setStatus(finalStatus);
+
+      if (finalStatus.state === "connected") {
+        toast.success("Tunnel verified", {
+          description: "Traffic is flowing through the tunnel — exit IP differs from real IP.",
+        });
+      } else if (finalStatus.state === "exhausted") {
+        toast.error("All paths exhausted", {
+          description:
+            finalStatus.exhaustedReason ||
+            "No candidate produced a verified tunnel. See the recovery log for details.",
+        });
+      } else {
+        // Aborted / reset mid-cycle
+        toast.info("Recovery cycle ended", {
+          description: `Final state: ${RECOVERY_STATE_LABELS[finalStatus.state].label}.`,
+        });
+      }
+
+      // Refresh local configs (success/failure streaks updated by the engine)
+      await refreshLocalConfigs();
+    } catch (e) {
+      toast.error("Recovery engine crashed", {
+        description: (e as Error).message || "Unexpected error during recovery.",
+      });
+    } finally {
+      setCycleRunning(false);
+    }
+  }, [cycleRunning, refreshLocalConfigs]);
+
+  // -------------------------------------------------------------------------
+  // Manual controls
+  // -------------------------------------------------------------------------
+  const handleAbort = useCallback(() => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    engine.abort();
+    setStatus(engine.getStatus());
+    setCycleRunning(false);
+    toast.info("Recovery aborted", {
+      description: "Engine stopped. Click Recover Connection to start a new cycle.",
+    });
+  }, []);
+
+  const handleDisconnect = useCallback(async () => {
+    const engine = engineRef.current;
+    if (!engine) return;
+    await engine.disconnect();
+    setStatus(engine.getStatus());
+    toast.info("Tunnel disconnected", {
+      description: "Health monitoring stopped. Engine returned to idle.",
+    });
+  }, []);
+
+  const handleReset = useCallback(() => {
+    const engine = engineRef.current;
+    if (engine) {
+      engine.reset();
+    } else {
+      engineRef.current = null;
+    }
+    setStatus(idleStatus());
+    setCycleRunning(false);
+    toast.info("Engine reset", {
+      description: "All state, attempts, and the active plan have been cleared.",
+    });
+  }, []);
+
+  const handleWipeAll = useCallback(async () => {
+    try {
+      await wipeAllConfigs();
+      await refreshLocalConfigs();
+      setWipeConfirming(false);
+      toast.success("All local configs wiped", {
+        description: "IndexedDB store cleared. The engine has no local candidates now.",
+      });
+    } catch (e) {
+      toast.error("Wipe failed", {
+        description: (e as Error).message || "Could not clear the local config store.",
+      });
+    }
+  }, [refreshLocalConfigs]);
+
+  const handleDeleteConfig = useCallback(
+    async (id: string) => {
+      try {
+        await deleteConfig(id);
+        await refreshLocalConfigs();
+        toast.success("Config removed", {
+          description: "Deleted from local IndexedDB store.",
+        });
+      } catch (e) {
+        toast.error("Delete failed", {
+          description: (e as Error).message || "Could not remove the config.",
+        });
+      }
+    },
+    [refreshLocalConfigs]
+  );
+
+  // -------------------------------------------------------------------------
+  // Import dialog actions (validate + add-to-favorites → local store)
+  // -------------------------------------------------------------------------
   const handleValidate = useCallback(async () => {
     if (!importUri.trim()) {
       setValidationError("Paste a config URI first");
@@ -360,27 +461,46 @@ export function EmergencyConnectivityView() {
         { input: importUri.trim(), probeReachability: importProbe }
       );
       setValidation(r);
-      // NOTE: we intentionally do NOT show a toast here. Sonner toasts are
-      // portaled to <body>, which can trigger Radix Dialog's outside-click
-      // handler and close the dialog prematurely. The validation result is
-      // already visible in the dialog (three status badges + parsed fields +
-      // warnings), so a toast would be redundant.
     } catch (e) {
       const msg = (e as Error).message || "Validation request failed";
       setValidationError(msg);
-      // Keep the dialog open on error — show the failure inline.
     } finally {
       setValidating(false);
     }
   }, [importUri, importProbe]);
 
-  const handleAddFavorite = useCallback(() => {
-    if (!validation) return;
-    toast.success("Marked for import", {
-      description:
-        "Import to favorites will be wired up in Phase 4 (post-recovery).",
-    });
-  }, [validation]);
+  const handleAddFavorite = useCallback(async () => {
+    if (!validation?.parsed) return;
+    const p = validation.parsed;
+    if (!p.host || !p.port) {
+      toast.error("Cannot save — host or port missing");
+      return;
+    }
+    try {
+      await addConfig({
+        uri: importUri.trim(),
+        label: `${PROTOCOL_LABEL[p.protocol as TransportType] ?? p.protocol} · ${p.host}:${p.port}`,
+        protocol: p.protocol as string,
+        host: p.host,
+        port: p.port,
+        score: p.antiDpiScore,
+        flags: p.flags,
+        country: null,
+        favorite: true,
+      });
+      await refreshLocalConfigs();
+      toast.success("Config saved locally", {
+        description:
+          "Available for emergency recovery offline. The engine will try it first next time.",
+      });
+      // Close the dialog so the user sees the new candidate in the list
+      closeImport();
+    } catch (e) {
+      toast.error("Could not save config", {
+        description: (e as Error).message || "IndexedDB write failed.",
+      });
+    }
+  }, [validation, importUri, refreshLocalConfigs]);
 
   const closeImport = useCallback(() => {
     setImportOpen(false);
@@ -389,102 +509,114 @@ export function EmergencyConnectivityView() {
     setValidationError(null);
   }, []);
 
-  // ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
   // Derived display data
-  // ---------------------------------------------------------------------------
-
-  const stateMeta = RECOVERY_STATE_LABELS[recoveryState];
-  const isFreeTier = userTier === "free";
-  const isVipLike = userTier === "vip" || userTier === "admin";
-  const statusData = statusState.data;
-  const statusError = statusState.error;
-
-  // Managed server pool — prefer /api/emergency/status (richer), fall back to
-  // /api/servers (always available, has protocols).
-  const emergencyServers = statusData?.managedServers ?? [];
-  const managedTotal = emergencyServers.length || serverList.length;
-  const managedOnline =
-    emergencyServers.length > 0
-      ? emergencyServers.filter((s) => s.online).length
-      : serverList.filter((s) => s.online).length;
-  const managedStealth =
-    emergencyServers.length > 0
-      ? emergencyServers.filter((s) => s.stealth).length
-      : serverList.filter((s) => s.stealth).length;
-  const managedProtocols = Array.from(
-    new Set(serverList.flatMap((s) => s.protocols?.map((p) => p) ?? []))
-  ).slice(0, 6);
-  const satelliteAvailable = statusData?.capabilities?.satelliteAvailable ?? false;
-
-  // Diagnosis only comes back WITH the plan (server can't probe user's device).
-  const diagnosis = activePlan?.diagnosis ?? null;
-  const candidates = activePlan?.candidates ?? [];
+  // -------------------------------------------------------------------------
+  const stateMeta = RECOVERY_STATE_LABELS[status.state];
+  const activePlan = status.activePlan;
+  const candidates: CandidatePath[] = activePlan?.candidates ?? [];
+  const attempts = status.attempts;
+  const currentCandidate = status.currentCandidate;
+  const canRecover =
+    !cycleRunning &&
+    status.state !== "diagnosing" &&
+    status.state !== "selecting" &&
+    status.state !== "connecting" &&
+    status.state !== "verifying";
+  const canAbort =
+    cycleRunning &&
+    (status.state === "diagnosing" ||
+      status.state === "selecting" ||
+      status.state === "connecting" ||
+      status.state === "verifying" ||
+      status.state === "recovering");
+  const canDisconnect = status.state === "connected" || status.state === "degraded";
 
   return (
     <div className="space-y-4">
+      {/* Engine platform badge */}
+      <Card className="glass border-white/5">
+        <CardContent className="p-4 flex items-center justify-between gap-4 flex-wrap">
+          <div className="flex items-center gap-3 min-w-0">
+            <div
+              className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 border"
+              style={{
+                background: companionDetected
+                  ? "rgba(16,217,160,0.10)"
+                  : "rgba(255,77,109,0.08)",
+                borderColor: companionDetected
+                  ? "rgba(16,217,160,0.35)"
+                  : "rgba(255,77,109,0.30)",
+                color: companionDetected ? "#10d9a0" : "#ff4d6d",
+              }}
+            >
+              <MonitorSmartphone className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-sm font-semibold text-white flex items-center gap-2 flex-wrap">
+                Engine:
+                <span
+                  className="font-mono text-xs px-2 py-0.5 rounded border"
+                  style={{
+                    color: companionDetected ? "#10d9a0" : "#ff4d6d",
+                    borderColor: companionDetected
+                      ? "rgba(16,217,160,0.35)"
+                      : "rgba(255,77,109,0.35)",
+                    background: companionDetected
+                      ? "rgba(16,217,160,0.06)"
+                      : "rgba(255,77,109,0.05)",
+                  }}
+                >
+                  {enginePlatform === "detecting"
+                    ? "detecting…"
+                    : enginePlatform}
+                </span>
+                <Badge
+                  variant="outline"
+                  className="text-[9px] font-tech uppercase tracking-wider h-4 border-white/10 text-muted-foreground"
+                >
+                  {localConfigs.length} local config{localConfigs.length === 1 ? "" : "s"}
+                </Badge>
+              </div>
+              <div className="text-xs text-muted-foreground mt-0.5">
+                {companionDetected
+                  ? "Desktop companion detected at 127.0.0.1:10809 — real tunneling available. The engine will verify traffic through the local SOCKS5 proxy."
+                  : "No desktop companion — browser can diagnose but cannot connect. Install the Distort Desktop app for real connectivity."}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={runDiagnose}
+              disabled={diagnosing}
+              className="border-white/10 text-muted-foreground hover:text-white font-tech uppercase tracking-wider text-[10px] h-8"
+            >
+              <RefreshCw className={`w-3 h-3 mr-1.5 ${diagnosing ? "animate-spin" : ""}`} />
+              Re-diagnose
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Honesty banner */}
       <Alert className="border-[#ffb020]/30 bg-[#ffb020]/[0.06] text-[#ffb020]">
         <AlertTriangle className="w-4 h-4" />
         <AlertTitle className="font-tech uppercase tracking-wider text-xs">
-          Emergency Connectivity — Beta
+          Web dashboard = diagnosis + validation only
         </AlertTitle>
         <AlertDescription className="text-[#eaf2ff]/80">
-          Emergency Connectivity is in beta. The server cannot verify
-          reachability from your device — the client (desktop or Android app)
-          must probe each candidate itself. No credentials are ever logged.
+          The web dashboard can diagnose your network and validate configs. To
+          actually establish a VPN tunnel, install the{" "}
+          <span className="text-[#5cf2ff]">Distort Desktop</span> app (which
+          exposes a local control API at 127.0.0.1:10809) or the Android app.
+          The engine will still try each candidate and report which ones have
+          valid structure + reachable servers, so when you install the desktop
+          app, it knows which to use.
         </AlertDescription>
       </Alert>
-
-      {/* Tier notice — satellite / VIP */}
-      {tierLoaded && isFreeTier && (
-        <Alert className="border-[#8b5cf6]/30 bg-[#8b5cf6]/[0.06] text-[#a78bfa]">
-          <Satellite className="w-4 h-4" />
-          <AlertTitle className="font-tech uppercase tracking-wider text-xs">
-            Satellite (Starlink) — VIP only
-          </AlertTitle>
-          <AlertDescription className="text-[#eaf2ff]/80">
-            🛰️ Satellite (Starlink) paths are VIP-only. Upgrade to access
-            off-grid resilience paths via the Account tab.
-          </AlertDescription>
-        </Alert>
-      )}
-      {tierLoaded && isVipLike && (
-        <Card className="glass border-white/5">
-          <CardContent className="p-4 flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 min-w-0">
-              <div className="w-9 h-9 rounded-lg bg-[#8b5cf6]/10 border border-[#8b5cf6]/30 text-[#a78bfa] flex items-center justify-center shrink-0">
-                <Satellite className="w-4 h-4" />
-              </div>
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-white flex items-center gap-2">
-                  Include satellite paths in plan
-                  <Badge
-                    variant="outline"
-                    className="text-[9px] font-tech uppercase tracking-wider h-4 border-[#8b5cf6]/30 text-[#a78bfa]"
-                  >
-                    {userTier === "admin" ? "ADMIN" : "VIP"}
-                  </Badge>
-                </div>
-                <div className="text-xs text-muted-foreground truncate">
-                  Starlink paths are reserved and never a dependency — the
-                  engine works entirely without them.
-                </div>
-                {tierLoaded && isVipLike && !satelliteAvailable && (
-                  <div className="text-[10px] text-[#ffb020]/80 mt-1">
-                    ⚠ Real Starlink infra is Phase 5 — candidates may appear
-                    but the client rejects them at the connecting stage.
-                  </div>
-                )}
-              </div>
-            </div>
-            <Switch
-              checked={includeSatellite}
-              onCheckedChange={setIncludeSatellite}
-              aria-label="Include satellite paths"
-            />
-          </CardContent>
-        </Card>
-      )}
 
       {/* Action bar */}
       <Card className="glass border-white/5">
@@ -493,20 +625,34 @@ export function EmergencyConnectivityView() {
             <Button
               type="button"
               onClick={handleRecover}
-              disabled={planning || recoveryState === "diagnosing" || recoveryState === "selecting"}
+              disabled={!canRecover}
               className="bg-brand-gradient text-[#02131a] hover:opacity-90 font-tech uppercase tracking-wider text-xs h-9"
             >
               <RefreshCw
-                className={`w-3.5 h-3.5 mr-1.5 ${
-                  planning ? "animate-spin" : ""
-                }`}
+                className={`w-3.5 h-3.5 mr-1.5 ${cycleRunning ? "animate-spin" : ""}`}
               />
-              {planning
-                ? "Building plan…"
-                : recoveryState === "selecting"
-                ? "Plan ready"
-                : "Recover Connection"}
+              {cycleRunning ? "Recovering…" : "Recover Connection"}
             </Button>
+            {canAbort && (
+              <Button
+                type="button"
+                onClick={handleAbort}
+                variant="outline"
+                className="border-[#ffb020]/30 text-[#ffb020] hover:bg-[#ffb020]/10 font-tech uppercase tracking-wider text-xs h-9"
+              >
+                <Ban className="w-3.5 h-3.5 mr-1.5" /> Abort
+              </Button>
+            )}
+            {canDisconnect && (
+              <Button
+                type="button"
+                onClick={handleDisconnect}
+                variant="outline"
+                className="border-[#ff4d6d]/30 text-[#ff4d6d] hover:bg-[#ff4d6d]/10 font-tech uppercase tracking-wider text-xs h-9"
+              >
+                <Power className="w-3.5 h-3.5 mr-1.5" /> Disconnect
+              </Button>
+            )}
             <Button
               type="button"
               onClick={() => setImportOpen(true)}
@@ -519,59 +665,97 @@ export function EmergencyConnectivityView() {
               type="button"
               onClick={handleReset}
               variant="outline"
-              disabled={recoveryState === "idle" && !activePlan && !attempts.length}
+              disabled={status.state === "idle" && !activePlan && !attempts.length}
               className="border-white/10 text-muted-foreground hover:text-white font-tech uppercase tracking-wider text-xs h-9"
             >
               <RotateCcw className="w-3.5 h-3.5 mr-1.5" /> Reset
             </Button>
             <div className="ml-auto flex items-center gap-2 text-[10px] font-tech uppercase tracking-wider text-muted-foreground">
               <Cpu className="w-3 h-3 text-[#00f0ff]" />
-              Tier:{" "}
-              <span
-                className={
-                  isVipLike ? "text-[#a78bfa]" : "text-muted-foreground"
-                }
-              >
-                {tierLoaded ? userTier.toUpperCase() : "…"}
+              State:
+              <span style={{ color: stateMeta.color }} className="font-mono">
+                {stateMeta.label}
               </span>
             </div>
           </div>
-          {planError && (
-            <div className="mt-3 text-xs text-[#ff4d6d] font-mono">
-              ⚠ {planError}
-            </div>
-          )}
         </CardContent>
       </Card>
 
-      {/* Top grid: diagnosis + state machine */}
+      {/* Top grid: diagnosis + recovery state */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <NetworkDiagnosisCard
-          statusError={statusError}
-          statusLoading={statusState.loading}
           diagnosis={diagnosis}
-          managedTotal={managedTotal}
-          managedOnline={managedOnline}
-          managedStealth={managedStealth}
-          managedProtocols={managedProtocols}
+          diagnosing={diagnosing}
+          onReDiagnose={runDiagnose}
         />
-
         <RecoveryStateCard
-          state={recoveryState}
+          status={status}
           stateMeta={stateMeta}
-          lastStateChangeAt={lastStateChangeAt}
-          activePlan={activePlan}
+          currentCandidate={currentCandidate}
         />
       </div>
 
       {/* Candidate paths */}
-      <CandidatePathsCard candidates={candidates} />
+      <CandidatePathsCard
+        candidates={candidates}
+        currentCandidateId={currentCandidate?.id ?? null}
+        attempts={attempts}
+        onDeleteConfig={handleDeleteConfig}
+      />
 
       {/* Recovery log */}
       <RecoveryLogCard attempts={attempts} />
 
+      {/* Danger zone */}
+      <Card className="glass border-[#ff4d6d]/20">
+        <CardHeader className="pb-2">
+          <CardTitle className="font-display tracking-wider text-sm flex items-center gap-2 text-[#ff4d6d]">
+            <Trash2 className="w-4 h-4" /> Danger Zone
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="flex items-center justify-between gap-4 flex-wrap">
+          <div className="text-xs text-muted-foreground max-w-xl">
+            Wipe all stored VPN configs from your browser&apos;s IndexedDB. This
+            is irreversible. The engine will lose its offline candidates and
+            fall back to remote-only (requires internet).
+          </div>
+          {wipeConfirming ? (
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                onClick={handleWipeAll}
+                className="bg-[#ff4d6d] text-white hover:bg-[#ff4d6d]/90 font-tech uppercase tracking-wider text-xs h-9"
+              >
+                <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Confirm wipe
+              </Button>
+              <Button
+                type="button"
+                onClick={() => setWipeConfirming(false)}
+                variant="outline"
+                className="border-white/10 text-muted-foreground hover:text-white font-tech uppercase tracking-wider text-xs h-9"
+              >
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <Button
+              type="button"
+              onClick={() => setWipeConfirming(true)}
+              variant="outline"
+              disabled={localConfigs.length === 0}
+              className="border-[#ff4d6d]/30 text-[#ff4d6d] hover:bg-[#ff4d6d]/10 font-tech uppercase tracking-wider text-xs h-9"
+            >
+              <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Wipe all local configs
+            </Button>
+          )}
+        </CardContent>
+      </Card>
+
       {/* Import dialog */}
-      <Dialog open={importOpen} onOpenChange={(o) => (o ? setImportOpen(true) : closeImport())}>
+      <Dialog
+        open={importOpen}
+        onOpenChange={(o) => (o ? setImportOpen(true) : closeImport())}
+      >
         <DialogContent className="sm:max-w-xl bg-[#0d1426] border-white/10 text-white">
           <DialogHeader>
             <DialogTitle className="font-display tracking-wider text-lg flex items-center gap-2">
@@ -580,8 +764,10 @@ export function EmergencyConnectivityView() {
             </DialogTitle>
             <DialogDescription className="text-muted-foreground text-xs">
               Paste a VLESS / VMess / Trojan / Shadowsocks URI. The Distort
-              parser will check structure, optionally probe reachability, and
-              show the three independent states. Credentials are never logged.
+              parser checks structure, optionally probes reachability, and shows
+              the three independent states. Saving stores the config in your
+              browser&apos;s IndexedDB so the recovery engine can use it
+              offline. Credentials are never logged.
             </DialogDescription>
           </DialogHeader>
 
@@ -620,16 +806,17 @@ export function EmergencyConnectivityView() {
             )}
 
             {validation && (
-              <ValidationResult
-                v={validation}
-                onAddFavorite={handleAddFavorite}
-              />
+              <ValidationResult v={validation} onAddFavorite={handleAddFavorite} />
             )}
           </div>
 
           <DialogFooter>
             <DialogClose asChild>
-              <Button type="button" variant="outline" className="font-tech uppercase tracking-wider text-xs h-9">
+              <Button
+                type="button"
+                variant="outline"
+                className="font-tech uppercase tracking-wider text-xs h-9"
+              >
                 Close
               </Button>
             </DialogClose>
@@ -654,21 +841,13 @@ export function EmergencyConnectivityView() {
 // ---------------------------------------------------------------------------
 
 function NetworkDiagnosisCard({
-  statusError,
-  statusLoading,
   diagnosis,
-  managedTotal,
-  managedOnline,
-  managedStealth,
-  managedProtocols,
+  diagnosing,
+  onReDiagnose,
 }: {
-  statusError: string | null;
-  statusLoading: boolean;
-  diagnosis: RecoveryPlan["diagnosis"] | null;
-  managedTotal: number;
-  managedOnline: number;
-  managedStealth: number;
-  managedProtocols: string[];
+  diagnosis: NetworkDiagnosis | null;
+  diagnosing: boolean;
+  onReDiagnose: () => void;
 }) {
   return (
     <Card className="glass border-white/5">
@@ -676,6 +855,9 @@ function NetworkDiagnosisCard({
         <div className="flex items-center justify-between">
           <CardTitle className="font-display tracking-wider text-sm flex items-center gap-2">
             <Globe className="w-4 h-4 text-[#00f0ff]" /> Network Diagnosis
+            <span className="text-xs text-muted-foreground font-tech">
+              · real client probes
+            </span>
           </CardTitle>
           <Badge
             variant="outline"
@@ -685,127 +867,99 @@ function NetworkDiagnosisCard({
                 : "border-white/10 text-muted-foreground"
             }`}
           >
-            {diagnosis ? "live" : "no probe yet"}
+            {diagnosing ? "probing…" : diagnosis ? "live" : "no probe yet"}
           </Badge>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Managed server pool summary */}
-        <div className="grid grid-cols-3 gap-2">
-          <Kpi
-            icon={<ServerIcon className="w-3 h-3" />}
-            label="Managed"
-            value={`${managedTotal}`}
-            color="#00f0ff"
-          />
-          <Kpi
-            icon={<CheckCircle2 className="w-3 h-3" />}
-            label="Online"
-            value={`${managedOnline}`}
-            color="#10d9a0"
-          />
-          <Kpi
-            icon={<ShieldCheck className="w-3 h-3" />}
-            label="Stealth"
-            value={`${managedStealth}`}
-            color="#8b5cf6"
-          />
-        </div>
-
-        {/* Capabilities */}
-        {managedProtocols.length > 0 && (
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[10px] font-tech uppercase tracking-wider text-muted-foreground">
-              Protocols:
-            </span>
-            {managedProtocols.map((p) => (
-              <Badge
-                key={p}
-                variant="outline"
-                className="text-[9px] font-tech uppercase tracking-wider h-4 border-white/10 text-muted-foreground"
-              >
-                {p}
-              </Badge>
-            ))}
-          </div>
-        )}
-
-        {/* Live diagnosis (DNS / reachability / latency) */}
-        {statusLoading ? (
-          <div className="space-y-1.5">
-            <div className="h-3 rounded bg-white/5 animate-pulse" />
-            <div className="h-3 rounded bg-white/5 animate-pulse w-3/4" />
-          </div>
-        ) : diagnosis ? (
-          <div className="rounded-lg border border-white/5 bg-white/[0.02] p-3 space-y-2">
+        {diagnosis ? (
+          <>
             <div className="grid grid-cols-2 gap-2 text-xs">
               <DiagRow
                 icon={<Wifi className="w-3 h-3" />}
                 label="Base network"
-                value={diagnosis.baseNetwork}
-                ok={diagnosis.baseNetwork === "online"}
+                value={baseNetworkLabel(diagnosis.baseNetwork)}
+                color={baseNetworkColor(diagnosis.baseNetwork)}
               />
               <DiagRow
                 icon={<Globe className="w-3 h-3" />}
                 label="DNS"
                 value={diagnosis.dnsWorks ? "works" : "broken"}
-                ok={diagnosis.dnsWorks}
+                color={diagnosis.dnsWorks ? "#10d9a0" : "#ff4d6d"}
               />
               <DiagRow
                 icon={<Network className="w-3 h-3" />}
                 label="International"
                 value={diagnosis.internationalReachable ? "reachable" : "blocked"}
-                ok={diagnosis.internationalReachable}
+                color={diagnosis.internationalReachable ? "#10d9a0" : "#ff4d6d"}
+              />
+              <DiagRow
+                icon={<Globe className="w-3 h-3" />}
+                label="Domestic (Iran)"
+                value={diagnosis.domesticReachable ? "reachable" : "blocked"}
+                color={diagnosis.domesticReachable ? "#10d9a0" : "#ff4d6d"}
               />
               <DiagRow
                 icon={<Zap className="w-3 h-3" />}
-                label="Latency"
+                label="Direct latency"
                 value={
                   diagnosis.directLatencyMs === null
-                    ? "—"
+                    ? "unreachable"
                     : `${diagnosis.directLatencyMs}ms`
                 }
-                ok={
-                  diagnosis.directLatencyMs !== null &&
-                  diagnosis.directLatencyMs < 200
+                color={
+                  diagnosis.directLatencyMs === null
+                    ? "#ff4d6d"
+                    : diagnosis.directLatencyMs < 200
+                    ? "#10d9a0"
+                    : "#ffb020"
                 }
               />
+              <DiagRow
+                icon={<Clock className="w-3 h-3" />}
+                label="Checked"
+                value={formatTime(diagnosis.checkedAt)}
+                color="#8aa0c4"
+              />
             </div>
-            {diagnosis.summary && (
-              <div className="text-[11px] text-muted-foreground pt-1 border-t border-white/5">
-                {diagnosis.summary}
-              </div>
-            )}
-          </div>
-        ) : statusError ? (
-          <div className="rounded-lg border border-[#ffb020]/20 bg-[#ffb020]/[0.04] p-3 text-[11px] text-[#ffb020]/90">
-            Emergency status endpoint returned an error ({statusError}). The
-            managed server pool above is from /api/servers. Build a plan to
-            get the diagnosis from the planner.
-          </div>
+            <div className="text-[11px] text-muted-foreground pt-1.5 border-t border-white/5">
+              {diagnosis.summary}
+            </div>
+          </>
         ) : (
-          <div className="rounded-lg border border-white/5 bg-white/[0.02] p-3 text-[11px] text-muted-foreground">
-            No diagnosis yet. The server cannot probe your device — click{" "}
-            <span className="text-[#5cf2ff]">Recover Connection</span> to build
-            a plan. The plan returns a diagnosis with the candidate list.
+          <div className="space-y-1.5">
+            <div className="h-3 rounded bg-white/5 animate-pulse" />
+            <div className="h-3 rounded bg-white/5 animate-pulse w-3/4" />
+            <div className="h-3 rounded bg-white/5 animate-pulse w-1/2" />
           </div>
         )}
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={onReDiagnose}
+          disabled={diagnosing}
+          className="w-full border-white/10 text-muted-foreground hover:text-white font-tech uppercase tracking-wider text-[10px] h-8"
+        >
+          <RefreshCw className={`w-3 h-3 mr-1.5 ${diagnosing ? "animate-spin" : ""}`} />
+          {diagnosing ? "Probing…" : "Re-diagnose"}
+        </Button>
       </CardContent>
     </Card>
   );
 }
 
 function RecoveryStateCard({
-  state,
+  status,
   stateMeta,
-  lastStateChangeAt,
-  activePlan,
+  currentCandidate,
 }: {
-  state: RecoveryState;
+  status: RecoveryStatus;
   stateMeta: { label: string; color: string; description: string };
-  lastStateChangeAt: string;
-  activePlan: RecoveryPlan | null;
+  currentCandidate: CandidatePath | null;
 }) {
+  const state = status.state;
+  const activePlan = status.activePlan;
   return (
     <Card className="glass border-white/5">
       <CardHeader className="pb-2">
@@ -815,7 +969,7 @@ function RecoveryStateCard({
           </CardTitle>
           <span className="text-[10px] text-muted-foreground font-tech uppercase tracking-wider flex items-center gap-1">
             <Clock className="w-2.5 h-2.5" />
-            {formatTime(lastStateChangeAt)}
+            {formatTime(status.lastStateChangeAt)}
           </span>
         </div>
       </CardHeader>
@@ -832,7 +986,8 @@ function RecoveryStateCard({
               className="inline-block w-2.5 h-2.5 rounded-full"
               style={{
                 background: stateMeta.color,
-                boxShadow: state !== "idle" ? `0 0 12px ${stateMeta.color}` : "none",
+                boxShadow:
+                  state !== "idle" ? `0 0 12px ${stateMeta.color}` : "none",
               }}
             />
             <span
@@ -842,12 +997,25 @@ function RecoveryStateCard({
               {stateMeta.label}
             </span>
             {state === "exhausted" && (
-              <AlertTriangle className="w-4 h-4 text-[#ff4d6d] ml-auto" />
+              <XCircle className="w-4 h-4 text-[#ff4d6d] ml-auto" />
+            )}
+            {state === "connected" && (
+              <CheckCircle2 className="w-4 h-4 text-[#10d9a0] ml-auto" />
             )}
           </div>
           <p className="text-xs text-muted-foreground mt-1">
             {stateMeta.description}
           </p>
+          {status.exhaustedReason && state === "exhausted" && (
+            <div className="mt-2 text-[11px] text-[#ff4d6d]/90 font-mono pl-2 border-l-2 border-[#ff4d6d]/40">
+              {status.exhaustedReason}
+            </div>
+          )}
+          {currentCandidate && state !== "idle" && state !== "exhausted" && (
+            <div className="mt-2 text-[11px] text-[#5cf2ff]/90 font-mono pl-2 border-l-2 border-[#00f0ff]/40">
+              Trying: {currentCandidate.label} · {currentCandidate.host}:{currentCandidate.port}
+            </div>
+          )}
         </div>
 
         {activePlan && (
@@ -860,29 +1028,13 @@ function RecoveryStateCard({
                 variant="outline"
                 className="text-[9px] font-mono border-white/10 text-muted-foreground"
               >
-                {activePlan.planId.slice(0, 8)}
+                {activePlan.planId.slice(0, 10)}
               </Badge>
             </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">Confidence</span>
-              <span
-                className="font-mono font-bold uppercase"
-                style={{ color: confidenceColor(activePlan.confidence) }}
-              >
-                {activePlan.confidence}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">Candidates</span>
-              <span className="font-mono text-white">
-                {activePlan.candidates.length}
-              </span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">Max attempts</span>
-              <span className="font-mono text-white">
-                {activePlan.policy.maxAttempts}
-              </span>
+            <div className="grid grid-cols-3 gap-2 text-xs">
+              <PlanStat label="Candidates" value={`${activePlan.candidates.length}`} />
+              <PlanStat label="Attempts" value={`${status.attemptsThisCycle}`} />
+              <PlanStat label="Max" value={`${activePlan.policy.maxAttempts}`} />
             </div>
             {activePlan.rationale && (
               <div className="text-[11px] text-muted-foreground pt-1.5 mt-1.5 border-t border-white/5">
@@ -894,36 +1046,61 @@ function RecoveryStateCard({
 
         {/* Mini state map */}
         <div className="flex items-center gap-1 flex-wrap text-[9px] font-tech uppercase tracking-wider">
-          {(["idle", "diagnosing", "selecting", "connecting", "verifying", "connected", "degraded", "recovering", "exhausted"] as RecoveryState[]).map(
-            (s, i, arr) => (
-              <span key={s} className="flex items-center gap-1">
-                <span
-                  className={`px-1.5 py-0.5 rounded border ${
-                    state === s
-                      ? "border-current"
-                      : "border-white/10 text-muted-foreground/60"
-                  }`}
-                  style={
-                    state === s
-                      ? { color: RECOVERY_STATE_LABELS[s].color }
-                      : undefined
-                  }
-                >
-                  {RECOVERY_STATE_LABELS[s].label}
-                </span>
-                {i < arr.length - 1 && (
-                  <span className="text-muted-foreground/30">→</span>
-                )}
+          {(
+            [
+              "idle",
+              "diagnosing",
+              "selecting",
+              "connecting",
+              "verifying",
+              "connected",
+              "degraded",
+              "recovering",
+              "exhausted",
+            ] as RecoveryState[]
+          ).map((s, i, arr) => (
+            <span key={s} className="flex items-center gap-1">
+              <span
+                className={`px-1.5 py-0.5 rounded border ${
+                  state === s ? "border-current" : "border-white/10 text-muted-foreground/60"
+                }`}
+                style={state === s ? { color: RECOVERY_STATE_LABELS[s].color } : undefined}
+              >
+                {RECOVERY_STATE_LABELS[s].label}
               </span>
-            )
-          )}
+              {i < arr.length - 1 && (
+                <span className="text-muted-foreground/30">→</span>
+              )}
+            </span>
+          ))}
         </div>
       </CardContent>
     </Card>
   );
 }
 
-function CandidatePathsCard({ candidates }: { candidates: CandidatePath[] }) {
+function CandidatePathsCard({
+  candidates,
+  currentCandidateId,
+  attempts,
+  onDeleteConfig,
+}: {
+  candidates: CandidatePath[];
+  currentCandidateId: string | null;
+  attempts: RecoveryAttempt[];
+  onDeleteConfig: (id: string) => void;
+}) {
+  // Build a per-candidate attempt lookup so we can show real-time result badges
+  // next to each candidate as the engine tries it.
+  const attemptByCandidate = new Map<string, RecoveryAttempt>();
+  for (const a of attempts) {
+    // attempts are most-recent-first; only set if not already present (first
+    // occurrence is the latest attempt for that candidate)
+    if (!attemptByCandidate.has(a.candidateId)) {
+      attemptByCandidate.set(a.candidateId, a);
+    }
+  }
+
   return (
     <Card className="glass border-white/5">
       <CardHeader className="pb-2">
@@ -935,7 +1112,7 @@ function CandidatePathsCard({ candidates }: { candidates: CandidatePath[] }) {
             </span>
           </CardTitle>
           <span className="text-[10px] text-muted-foreground font-tech uppercase tracking-wider">
-            Ordered · best first
+            local + remote · best first
           </span>
         </div>
       </CardHeader>
@@ -943,20 +1120,29 @@ function CandidatePathsCard({ candidates }: { candidates: CandidatePath[] }) {
         {candidates.length === 0 ? (
           <div className="text-center py-10">
             <Radio className="w-10 h-10 text-muted-foreground/40 mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">
-              No candidates yet.
-            </p>
+            <p className="text-sm text-muted-foreground">No candidates yet.</p>
             <p className="text-xs text-muted-foreground/70 mt-1">
-              Click <span className="text-[#5cf2ff]">Recover Connection</span>{" "}
-              to build a recovery plan. The server returns an ordered candidate
-              list — the client must probe each one.
+              Click <span className="text-[#5cf2ff]">Recover Connection</span> to
+              gather local + remote candidates, or import a config to seed the
+              local store.
             </p>
           </div>
         ) : (
-          <div className="max-h-[560px] overflow-y-auto pr-1 -mr-1 space-y-2">
-            {candidates.map((c, i) => (
-              <CandidateRow key={c.id} c={c} index={i} />
-            ))}
+          <div className="max-h-[560px] overflow-y-auto pr-1 -mr-1 space-y-2 custom-scroll">
+            {candidates.map((c, i) => {
+              const lastAttempt = attemptByCandidate.get(c.id) ?? null;
+              return (
+                <CandidateRow
+                  key={c.id}
+                  c={c}
+                  index={i}
+                  isLocal={isLocalCandidate(c.id)}
+                  isCurrent={currentCandidateId === c.id}
+                  lastAttempt={lastAttempt}
+                  onDeleteConfig={onDeleteConfig}
+                />
+              );
+            })}
           </div>
         )}
       </CardContent>
@@ -964,19 +1150,47 @@ function CandidatePathsCard({ candidates }: { candidates: CandidatePath[] }) {
   );
 }
 
-function CandidateRow({ c, index }: { c: CandidatePath; index: number }) {
+function CandidateRow({
+  c,
+  index,
+  isLocal,
+  isCurrent,
+  lastAttempt,
+  onDeleteConfig,
+}: {
+  c: CandidatePath;
+  index: number;
+  isLocal: boolean;
+  isCurrent: boolean;
+  lastAttempt: RecoveryAttempt | null;
+  onDeleteConfig: (id: string) => void;
+}) {
   const protoColor = protocolColor(c.protocol);
   const struct = structuralBadge(c.lastProbe?.structural ?? "valid");
   const reach = reachabilityBadge(c.lastProbe?.reachability ?? "not-probed");
   const tunnel = tunnelBadge(c.lastProbe?.tunnel ?? "not-attempted");
   const notProbed = !c.lastProbe;
 
+  // Reflect the engine's most recent attempt at this candidate, if any
+  const attemptColor =
+    lastAttempt?.result === "success"
+      ? "#10d9a0"
+      : lastAttempt?.result === "failure"
+      ? "#ff4d6d"
+      : lastAttempt?.result === "in-progress"
+      ? "#00f0ff"
+      : null;
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: Math.min(index * 0.02, 0.4) }}
-      className="rounded-xl border border-white/5 bg-white/[0.02] hover:border-[#00f0ff]/20 hover:bg-white/[0.04] transition-colors p-3"
+      className={`rounded-xl border p-3 transition-colors ${
+        isCurrent
+          ? "border-[#00f0ff]/40 bg-[#00f0ff]/[0.04]"
+          : "border-white/5 bg-white/[0.02] hover:border-[#00f0ff]/20 hover:bg-white/[0.04]"
+      }`}
     >
       <div className="flex items-center gap-3">
         {/* Rank */}
@@ -994,13 +1208,19 @@ function CandidateRow({ c, index }: { c: CandidatePath; index: number }) {
             <Badge
               variant="outline"
               className="text-[9px] font-tech uppercase tracking-wider h-4"
-              style={{
-                borderColor: `${protoColor}40`,
-                color: protoColor,
-              }}
+              style={{ borderColor: `${protoColor}40`, color: protoColor }}
             >
-              {c.protocol === "satellite" ? "🛰️ " : ""}
               {PROTOCOL_LABEL[c.protocol]}
+            </Badge>
+            <Badge
+              variant="outline"
+              className={`text-[9px] font-tech uppercase tracking-wider h-4 ${
+                isLocal
+                  ? "border-[#00f0ff]/30 text-[#5cf2ff]"
+                  : "border-[#8b5cf6]/30 text-[#a78bfa]"
+              }`}
+            >
+              {isLocal ? "local" : "remote"}
             </Badge>
             {c.stealth && (
               <Badge
@@ -1008,14 +1228,6 @@ function CandidateRow({ c, index }: { c: CandidatePath; index: number }) {
                 className="text-[9px] font-tech uppercase tracking-wider h-4 border-[#8b5cf6]/30 text-[#a78bfa]"
               >
                 <ShieldCheck className="w-2.5 h-2.5 mr-0.5" />Stealth
-              </Badge>
-            )}
-            {c.vipOnly && (
-              <Badge
-                variant="outline"
-                className="text-[9px] font-tech uppercase tracking-wider h-4 border-[#ffb020]/30 text-[#ffb020]"
-              >
-                <Crown className="w-2.5 h-2.5 mr-0.5" />VIP
               </Badge>
             )}
             {c.exitCountry && (
@@ -1026,29 +1238,39 @@ function CandidateRow({ c, index }: { c: CandidatePath; index: number }) {
                 {c.exitCountry}
               </Badge>
             )}
+            {attemptColor && (
+              <Badge
+                variant="outline"
+                className="text-[9px] font-tech uppercase tracking-wider h-4"
+                style={{ borderColor: `${attemptColor}40`, color: attemptColor }}
+              >
+                {lastAttempt?.result}
+              </Badge>
+            )}
+            {c.successStreak > 0 && (
+              <span className="text-[10px] font-mono text-[#10d9a0]/80">
+                ✓{c.successStreak}
+              </span>
+            )}
+            {c.failureStreak > 0 && (
+              <span className="text-[10px] font-mono text-[#ff4d6d]/80">
+                ✗{c.failureStreak}
+              </span>
+            )}
           </div>
           <div className="text-[11px] text-muted-foreground font-mono truncate mt-0.5">
             {c.host}:{c.port}
-            {c.lastProbe?.latencyMs !== null &&
-              c.lastProbe?.latencyMs !== undefined && (
-                <span className="text-muted-foreground/70">
-                  {" "}
-                  · {c.lastProbe.latencyMs}ms
-                </span>
-              )}
-            {c.lastProbe?.exitIp && (
-              <span className="text-[#10d9a0]/80">
-                {" "}
-                · exit {c.lastProbe.exitIp}
-              </span>
-            )}
           </div>
         </div>
 
         {/* Three independent status badges */}
         <div className="flex items-center gap-1.5 shrink-0">
           <StatusBadge label={struct.label} color={struct.color} dim={notProbed} />
-          <StatusBadge label={reach.label} color={reach.color} dim={notProbed || c.lastProbe?.reachability === "not-probed"} />
+          <StatusBadge
+            label={reach.label}
+            color={reach.color}
+            dim={notProbed || c.lastProbe?.reachability === "not-probed"}
+          />
           <StatusBadge
             label={tunnel.label}
             color={tunnel.color}
@@ -1068,11 +1290,29 @@ function CandidateRow({ c, index }: { c: CandidatePath; index: number }) {
             anti-dpi
           </div>
         </div>
+
+        {/* Remove (local only) */}
+        {isLocal && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => onDeleteConfig(c.id)}
+            className="h-7 w-7 p-0 text-muted-foreground hover:text-[#ff4d6d] hover:bg-[#ff4d6d]/10"
+            aria-label={`Remove ${c.label}`}
+            title="Remove from local store"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </Button>
+        )}
       </div>
 
-      {c.lastProbe?.failureReason && (
-        <div className="mt-2 text-[10px] text-[#ff4d6d]/90 font-mono pl-10">
-          ⚠ {c.lastProbe.failureReason}
+      {lastAttempt?.reason && (
+        <div
+          className="mt-2 text-[10px] font-mono pl-10"
+          style={{ color: attemptColor ?? "#8aa0c4" }}
+        >
+          {lastAttempt.reason}
         </div>
       )}
     </motion.div>
@@ -1093,10 +1333,7 @@ function StatusBadge({
       className={`px-1.5 py-0.5 rounded border text-[9px] font-tech uppercase tracking-wider ${
         dim ? "opacity-50" : ""
       }`}
-      style={{
-        borderColor: `${color}40`,
-        color,
-      }}
+      style={{ borderColor: `${color}40`, color }}
     >
       {label}
     </span>
@@ -1114,9 +1351,12 @@ function RecoveryLogCard({ attempts }: { attempts: RecoveryAttempt[] }) {
               · {attempts.length}
             </span>
           </CardTitle>
-          <span className="text-[10px] text-muted-foreground font-tech uppercase tracking-wider">
-            NO credentials logged
-          </span>
+          <Badge
+            variant="outline"
+            className="text-[9px] font-tech uppercase tracking-wider h-4 border-[#10d9a0]/30 text-[#10d9a0]"
+          >
+            <ShieldCheck className="w-2.5 h-2.5 mr-0.5" /> NO credentials logged
+          </Badge>
         </div>
       </CardHeader>
       <CardContent>
@@ -1124,18 +1364,17 @@ function RecoveryLogCard({ attempts }: { attempts: RecoveryAttempt[] }) {
           <div className="text-center py-10">
             <Clock className="w-10 h-10 text-muted-foreground/40 mx-auto mb-3" />
             <p className="text-sm text-muted-foreground">
-              Recovery attempts will appear here once the client executes the
-              plan.
+              Recovery attempts will appear here as the engine runs.
             </p>
             <p className="text-xs text-muted-foreground/70 mt-1">
-              Each attempt logs: timestamp, candidate, result, reason — never
-              the config URI or credentials.
+              Each attempt logs: timestamp, candidate label, result, reason,
+              latency — never the config URI or credentials.
             </p>
           </div>
         ) : (
-          <div className="max-h-[400px] overflow-y-auto pr-1 -mr-1 space-y-1.5">
+          <div className="max-h-[400px] overflow-y-auto pr-1 -mr-1 space-y-1.5 custom-scroll">
             {attempts.map((a, i) => (
-              <AttemptRow key={`${a.planId}-${a.attemptNumber}-${i}`} a={a} />
+              <AttemptRow key={`${a.planId}-${a.candidateId}-${a.attemptNumber}-${i}`} a={a} />
             ))}
           </div>
         )}
@@ -1157,15 +1396,15 @@ function AttemptRow({ a }: { a: RecoveryAttempt }) {
     <div className="rounded-lg border border-white/5 bg-white/[0.02] p-2.5 flex items-start gap-3 text-xs">
       <span
         className="inline-block w-2 h-2 rounded-full mt-1.5 shrink-0"
-        style={{ background: color }}
+        style={{ background: color, boxShadow: `0 0 6px ${color}` }}
       />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-mono text-muted-foreground text-[10px]">
             {formatTime(a.startedAt)}
           </span>
-          <span className="font-mono text-white text-[11px] truncate">
-            {a.candidateId}
+          <span className="font-mono text-white text-[11px] truncate max-w-[260px]">
+            {a.candidateLabel ?? a.candidateId}
           </span>
           <Badge
             variant="outline"
@@ -1187,7 +1426,7 @@ function AttemptRow({ a }: { a: RecoveryAttempt }) {
           )}
         </div>
         {a.reason && (
-          <div className="text-[10px] text-muted-foreground mt-1 pl-1">
+          <div className="text-[10px] text-muted-foreground mt-1 pl-1 break-words">
             {a.reason}
           </div>
         )}
@@ -1210,9 +1449,13 @@ function ValidationResult({
 
   return (
     <div className="rounded-lg border border-white/5 bg-white/[0.02] p-3 space-y-2.5">
-      <div className="flex items-center gap-1.5">
+      <div className="flex items-center gap-1.5 flex-wrap">
         <StatusBadge label={struct.label} color={struct.color} />
-        <StatusBadge label={reach.label} color={reach.color} dim={v.reachability === "not-probed"} />
+        <StatusBadge
+          label={reach.label}
+          color={reach.color}
+          dim={v.reachability === "not-probed"}
+        />
         <StatusBadge label={tunnel.label} color={tunnel.color} dim />
         {v.latencyMs !== null && v.latencyMs !== undefined && (
           <span className="font-mono text-[10px] text-[#10d9a0] ml-auto">
@@ -1221,28 +1464,20 @@ function ValidationResult({
         )}
       </div>
 
-      {v.summary && (
-        <div className="text-[11px] text-muted-foreground">{v.summary}</div>
-      )}
+      {v.summary && <div className="text-[11px] text-muted-foreground">{v.summary}</div>}
 
       {parsed && (
         <div className="grid grid-cols-2 gap-1.5 text-[11px] font-mono">
           {parsed.host && (
             <Field label="host" value={`${parsed.host}:${parsed.port ?? "?"}`} />
           )}
-          {parsed.network && (
-            <Field label="network" value={parsed.network} />
-          )}
-          {parsed.security && (
-            <Field label="security" value={parsed.security} />
-          )}
+          {parsed.network && <Field label="network" value={parsed.network} />}
+          {parsed.security && <Field label="security" value={parsed.security} />}
           {parsed.sni && <Field label="sni" value={parsed.sni} />}
           <Field
             label="creds"
             value={parsed.hasRequiredCredentials ? "present" : "missing"}
-            color={
-              parsed.hasRequiredCredentials ? "#10d9a0" : "#ffb020"
-            }
+            color={parsed.hasRequiredCredentials ? "#10d9a0" : "#ffb020"}
           />
           <Field
             label="anti-dpi"
@@ -1289,10 +1524,10 @@ function ValidationResult({
           disabled={v.structural !== "valid"}
           className="font-tech uppercase tracking-wider text-[10px] h-7 border-[#00f0ff]/30 text-[#5cf2ff] hover:bg-[#00f0ff]/10"
         >
-          <Crown className="w-3 h-3 mr-1" /> Add to favorites
+          <ShieldCheck className="w-3 h-3 mr-1" /> Save to local store
         </Button>
         <span className="text-[10px] text-muted-foreground/70">
-          actual import is Phase 4
+          Stored in IndexedDB · available offline
         </span>
       </div>
     </div>
@@ -1313,17 +1548,14 @@ function Field({
       <span className="text-muted-foreground/70 text-[9px] uppercase tracking-wider font-tech">
         {label}:
       </span>
-      <span
-        className="text-white truncate"
-        style={color ? { color } : undefined}
-      >
+      <span className="text-white truncate" style={color ? { color } : undefined}>
         {value}
       </span>
     </div>
   );
 }
 
-function Kpi({
+function DiagRow({
   icon,
   label,
   value,
@@ -1335,34 +1567,6 @@ function Kpi({
   color: string;
 }) {
   return (
-    <div className="rounded-lg border border-white/5 bg-white/[0.02] px-2.5 py-2">
-      <div
-        className="flex items-center gap-1 text-[10px] uppercase tracking-wider font-tech"
-        style={{ color }}
-      >
-        {icon}
-        {label}
-      </div>
-      <div className="font-mono text-sm font-semibold mt-0.5 text-white">
-        {value}
-      </div>
-    </div>
-  );
-}
-
-function DiagRow({
-  icon,
-  label,
-  value,
-  ok,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  ok: boolean;
-}) {
-  const color = ok ? "#10d9a0" : "#ff4d6d";
-  return (
     <div className="flex items-center gap-2">
       <span className="text-muted-foreground">{icon}</span>
       <span className="text-muted-foreground text-[10px] font-tech uppercase tracking-wider flex-1">
@@ -1371,6 +1575,17 @@ function DiagRow({
       <span className="font-mono text-xs font-semibold" style={{ color }}>
         {value}
       </span>
+    </div>
+  );
+}
+
+function PlanStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between">
+      <span className="text-muted-foreground text-[10px] font-tech uppercase tracking-wider">
+        {label}
+      </span>
+      <span className="font-mono text-white">{value}</span>
     </div>
   );
 }
