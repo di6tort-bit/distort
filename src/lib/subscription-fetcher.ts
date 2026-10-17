@@ -19,7 +19,8 @@ const MAX_REDIRECTS = 3;
 const FETCH_TIMEOUT_MS = 15000;
 
 // Validate that a URL is safe to fetch (no SSRF)
-function validateSubscriptionUrl(urlStr: string): { ok: boolean; error?: string; url?: URL } {
+// Includes DNS resolution check: blocks domains that resolve to private IPs
+async function validateSubscriptionUrl(urlStr: string): Promise<{ ok: boolean; error?: string; url?: URL }> {
   let url: URL;
   try {
     url = new URL(urlStr);
@@ -34,7 +35,7 @@ function validateSubscriptionUrl(urlStr: string): { ok: boolean; error?: string;
 
   const host = url.hostname.toLowerCase();
 
-  // Block private/internal IPs (SSRF protection)
+  // Block private/internal IPs by hostname pattern
   if (/^10\./.test(host)) return { ok: false, error: "Private IP blocked (10.x)" };
   if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(host)) return { ok: false, error: "Private IP blocked (172.16-31.x)" };
   if (/^192\.168\./.test(host)) return { ok: false, error: "Private IP blocked (192.168.x)" };
@@ -57,6 +58,39 @@ function validateSubscriptionUrl(urlStr: string): { ok: boolean; error?: string;
     return { ok: false, error: "CGNAT range blocked" };
   }
 
+  // CRITICAL: DNS resolution check
+  // A domain like "evil.com" could resolve to 127.0.0.1 or 169.254.169.254
+  // (DNS rebinding attack). We must resolve the hostname and check ALL IPs.
+  if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(host) && !host.includes(":")) {
+    // It's a domain name, not an IP — resolve it
+    try {
+      const dns = await import("dns");
+      const addresses = await dns.promises.lookup(host, { all: true });
+      if (addresses.length === 0) {
+        return { ok: false, error: "DNS resolution returned no addresses" };
+      }
+      for (const addr of addresses) {
+        const ip = addr.address;
+        // Check each resolved IP against private ranges
+        if (/^10\./.test(ip)) return { ok: false, error: `DNS resolved to private IP: ${ip}` };
+        if (/^172\.(1[6-9]|2[0-9]|3[01])\./.test(ip)) return { ok: false, error: `DNS resolved to private IP: ${ip}` };
+        if (/^192\.168\./.test(ip)) return { ok: false, error: `DNS resolved to private IP: ${ip}` };
+        if (/^127\./.test(ip)) return { ok: false, error: `DNS resolved to loopback: ${ip}` };
+        if (ip === "169.254.169.254") return { ok: false, error: `DNS resolved to cloud metadata: ${ip}` };
+        if (/^169\.254\./.test(ip)) return { ok: false, error: `DNS resolved to link-local: ${ip}` };
+        if (/^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\./.test(ip)) {
+          return { ok: false, error: `DNS resolved to CGNAT: ${ip}` };
+        }
+        if (/^fd[0-9a-f]{2}:/.test(ip.toLowerCase())) return { ok: false, error: `DNS resolved to IPv6 ULA: ${ip}` };
+        if (ip === "::1") return { ok: false, error: `DNS resolved to IPv6 loopback: ${ip}` };
+        if (/^fe80:/.test(ip.toLowerCase())) return { ok: false, error: `DNS resolved to IPv6 link-local: ${ip}` };
+      }
+    } catch (dnsErr: any) {
+      // If DNS fails, we can't verify — block by default (safer)
+      return { ok: false, error: `DNS resolution failed: ${dnsErr.message}` };
+    }
+  }
+
   return { ok: true, url };
 }
 
@@ -66,7 +100,7 @@ export async function fetchAndParseSubscription(sub: {
   enabled: boolean;
 }): Promise<number> {
   // 1. Validate the initial URL for SSRF
-  const validation = validateSubscriptionUrl(sub.url);
+  const validation = await validateSubscriptionUrl(sub.url);
   if (!validation.ok || !validation.url) {
     await db.subscription.update({
       where: { id: sub.id },
@@ -112,7 +146,7 @@ export async function fetchAndParseSubscription(sub: {
       // Resolve relative redirects against current URL
       const nextUrl = new URL(location, currentUrl).toString();
       // CRITICAL: re-validate the redirect destination for SSRF
-      const redirectValidation = validateSubscriptionUrl(nextUrl);
+      const redirectValidation = await validateSubscriptionUrl(nextUrl);
       if (!redirectValidation.ok || !redirectValidation.url) {
         await db.subscription.update({
           where: { id: sub.id },
@@ -244,7 +278,6 @@ async function processAndStore(sub: { id: string; url: string; enabled: boolean 
   // Note: This is still not perfectly atomic across concurrent calls,
   // but it's much safer than delete-first. For true isolation, the caller
   // should use a mutex per subscription ID.
-  const cutoffTime = new Date(); // capture AFTER all inserts complete
   await db.importedConfig.deleteMany({
     where: {
       subscriptionId: sub.id,

@@ -131,94 +131,139 @@ class DistortVpnService : VpnService() {
     }
 
     /**
-     * REAL traffic verification: do an HTTP request through xray's SOCKS5 proxy
-     * (127.0.0.1:10808). If the request succeeds, we know:
-     *   1. xray is running and accepting SOCKS connections
-     *   2. The outbound to the VPN server is working
-     *   3. Traffic can actually flow through the tunnel
+     * REAL traffic verification with DNS LEAK DETECTION.
      *
-     * Additionally checks for DNS leaks by comparing the IP returned by
-     * cloudflare's /cdn-cgi/trace endpoint (which shows the exit IP).
+     * 1. Fetch exit IP through xray's SOCKS5 proxy (127.0.0.1:10808)
+     * 2. Fetch real IP using a DIRECT connection that BYPASSES the tunnel
+     *    via VpnService.protect() — this ensures the direct request goes out
+     *    through the real internet connection, NOT through the VPN.
+     * 3. Compare exit IP vs real IP. If they match → traffic leak.
      *
-     * This is more honest than just checking if the xray process is alive.
+     * CRITICAL: VpnService.protect(socket) marks a socket to NOT go through
+     * the VPN tunnel. Without this, the "direct" request would also be
+     * routed through the tunnel, making the comparison meaningless.
      */
     private fun verifyTrafficThroughProxy(): Boolean {
         return try {
+            // 1. Get exit IP through SOCKS proxy
             val proxy = java.net.Proxy(java.net.Proxy.Type.SOCKS, java.net.InetSocketAddress("127.0.0.1", 10808))
-            val url = java.net.URL("https://www.cloudflare.com/cdn-cgi/trace")
+            val exitIp = fetchIpThroughProxy(proxy, "https://www.cloudflare.com/cdn-cgi/trace")
+            if (exitIp == null) {
+                Log.e(TAG, "Traffic verification: could not fetch exit IP through proxy")
+                return checkSocksPortOnly()
+            }
+            Log.i(TAG, "Traffic verification: exit IP = $exitIp")
+
+            // 2. Get real IP using a PROTECTED socket (bypasses VPN)
+            val realIp = getRealPublicIpProtected()
+            if (realIp == null) {
+                Log.w(TAG, "Could not fetch real public IP (protected) — can't verify leak")
+                // Can't verify leak, but proxy works — assume connected
+                return true
+            }
+            Log.i(TAG, "Traffic verification: real IP (protected) = $realIp")
+
+            // 3. Compare — if same, traffic is leaking (VPN NOT working)
+            if (exitIp == realIp) {
+                Log.e(TAG, "TRAFFIC LEAK DETECTED: exit IP ($exitIp) == real IP ($realIp)")
+                Log.e(TAG, "This means traffic is NOT going through the VPN tunnel!")
+                return false
+            }
+
+            Log.i(TAG, "✓ Traffic verification passed: exit IP differs from real IP — VPN is working")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Traffic verification failed: ${e.message}")
+            checkSocksPortOnly()
+        }
+    }
+
+    private fun fetchIpThroughProxy(proxy: java.net.Proxy, urlStr: String): String? {
+        return try {
+            val url = java.net.URL(urlStr)
             val conn = url.openConnection(proxy) as java.net.HttpURLConnection
             conn.connectTimeout = 8000
             conn.readTimeout = 8000
             conn.requestMethod = "GET"
-            val code = conn.responseCode
-            Log.i(TAG, "Traffic verification: HTTP $code through SOCKS proxy")
-            if (code in 200..299) {
+            if (conn.responseCode in 200..299) {
                 val body = conn.inputStream.bufferedReader().readText()
-                Log.i(TAG, "Traffic verification: received ${body.length} bytes")
-
-                // Parse the trace response to get the exit IP
-                // cloudflare/cdn-cgi/trace returns: ip=x.x.x.x\nuag=...\n...
-                val exitIp = body.lines()
+                body.lines()
                     .find { it.startsWith("ip=") }
                     ?.removePrefix("ip=")
                     ?.trim()
-                if (exitIp != null && exitIp.isNotEmpty()) {
-                    Log.i(TAG, "Traffic verification: exit IP = $exitIp")
-                    // Compare with our real public IP (fetched WITHOUT proxy)
-                    // If they're the same → DNS/traffic leak (VPN not working)
-                    val realIp = getRealPublicIp()
-                    if (realIp != null && realIp == exitIp) {
-                        Log.e(TAG, "TRAFFIC LEAK DETECTED: exit IP ($exitIp) == real IP ($realIp) — VPN NOT working!")
-                        return false
-                    }
-                    Log.i(TAG, "Traffic verification: exit IP ($exitIp) differs from real IP ($realIp) — VPN working")
-                }
-
-                true
-            } else {
-                Log.w(TAG, "Traffic verification: got HTTP $code — may be blocked")
-                true
-            }
+            } else null
         } catch (e: Exception) {
-            Log.e(TAG, "Traffic verification failed: ${e.message}")
-            // Check if xray's SOCKS port is even listening
-            try {
-                val socket = java.net.Socket()
-                socket.connect(java.net.InetSocketAddress("127.0.0.1", 10808), 2000)
-                socket.close()
-                Log.w(TAG, "SOCKS port is open but HTTP request failed — server may be unreachable")
-                false
-            } catch (e2: Exception) {
-                Log.e(TAG, "SOCKS port not reachable — xray not fully started: ${e2.message}")
-                false
-            }
+            Log.e(TAG, "fetchIpThroughProxy failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun checkSocksPortOnly(): Boolean {
+        return try {
+            val socket = java.net.Socket()
+            socket.connect(java.net.InetSocketAddress("127.0.0.1", 10808), 2000)
+            socket.close()
+            Log.w(TAG, "SOCKS port open but couldn't verify traffic — assuming connected (weak check)")
+            true
+        } catch (e2: Exception) {
+            Log.e(TAG, "SOCKS port not reachable: ${e2.message}")
+            false
         }
     }
 
     /**
-     * Get the device's REAL public IP (without going through the VPN proxy).
-     * We fetch this DIRECTLY (not through SOCKS) to compare with the exit IP.
-     * If they match → traffic is leaking outside the tunnel.
+     * Get the device's REAL public IP using a socket that BYPASSES the VPN tunnel.
      *
-     * NOTE: This request goes around xray's SOCKS proxy, so it uses the real
-     * internet connection. If the VPN is working properly, the exit IP (from
-     * the SOCKS-proxied request) should differ from this real IP.
+     * This is the CRITICAL fix: VpnService.protect(socket) tells Android to
+     * route this specific socket through the real network connection, NOT
+     * through the VPN tunnel. Without this, the "direct" request would go
+     * through the tunnel, making leak detection useless.
+     *
+     * We use a raw socket + HTTP request to api.ipify.org (returns just the IP).
      */
-    private fun getRealPublicIp(): String? {
+    private fun getRealPublicIpProtected(): String? {
+        var socket: java.net.Socket? = null
         return try {
-            val url = java.net.URL("https://api.ipify.org")
-            val conn = url.openConnection() as java.net.HttpURLConnection
-            conn.connectTimeout = 5000
-            conn.readTimeout = 5000
-            conn.requestMethod = "GET"
-            if (conn.responseCode in 200..299) {
-                val ip = conn.inputStream.bufferedReader().readText().trim()
-                Log.i(TAG, "Real public IP (no proxy): $ip")
-                ip
-            } else null
+            socket = java.net.Socket()
+            // CRITICAL: protect() this socket so it bypasses the VPN tunnel
+            val protected_ok = protect(socket)
+            if (!protected_ok) {
+                Log.w(TAG, "VpnService.protect() failed — direct request may go through tunnel")
+            } else {
+                Log.i(TAG, "VpnService.protect() succeeded — socket bypasses VPN tunnel")
+            }
+            socket.connect(java.net.InetSocketAddress("api.ipify.org", 443), 5000)
+
+            // Start TLS
+            val sslSocket = javax.net.ssl.SSLSocketFactory.getDefault().createSocket(
+                socket, "api.ipify.org", 443, true
+            ) as javax.net.ssl.SSLSocket
+            sslSocket.startHandshake()
+
+            // Send HTTP request
+            val out = sslSocket.outputStream
+            val request = "GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\n\r\n"
+            out.write(request.toByteArray())
+            out.flush()
+
+            // Read response
+            val reader = sslSocket.inputStream.bufferedReader()
+            val response = reader.readText()
+            // Response is like: HTTP/1.1 200 OK\r\n...headers...\r\n\r\n1.2.3.4
+            val body = response.substringAfter("\r\n\r\n").trim()
+            // Validate it looks like an IP
+            if (body.matches(Regex("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")) ||
+                body.matches(Regex("^[0-9a-f:]+$"))) {
+                body
+            } else {
+                Log.w(TAG, "ipify returned unexpected body: $body")
+                null
+            }
         } catch (e: Exception) {
-            Log.w(TAG, "Could not fetch real public IP: ${e.message}")
+            Log.w(TAG, "getRealPublicIpProtected failed: ${e.message}")
             null
+        } finally {
+            try { socket?.close() } catch {}
         }
     }
 

@@ -275,16 +275,15 @@ async function startVpnEngine(server, protocol, configUri) {
         windowsHide: true,
         stdio: ["ignore", "pipe", "pipe"],
     });
-    // Track xray's health — only mark "connected" after REAL traffic verification
+    // Track xray's health — only mark "connected" after REAL HTTP request through proxy
     let handshakeConfirmed = false;
     let startupError = "";
     const startupTimeout = setTimeout(() => {
         if (!handshakeConfirmed && !startupError) {
-            // xray is still alive after 5s — verify traffic actually flows through the tunnel.
-            // We do this by fetching a public-IP endpoint THROUGH the SOCKS proxy xray exposes.
-            // If the fetch succeeds, we know: (1) xray is running, (2) the tunnel is up,
-            // (3) traffic can flow through it. This is more honest than just "process alive".
-            verifyTrafficFlows().then((verified) => {
+            // xray is still alive after 5s — do a REAL HTTP request through the
+            // SOCKS proxy to verify traffic actually flows to the destination.
+            // This is more honest than just checking if the SOCKS port is open.
+            verifyHttpThroughProxy().then((verified) => {
                 if (verified && !handshakeConfirmed && !startupError) {
                     handshakeConfirmed = true;
                     store.set("vpn", {
@@ -295,10 +294,10 @@ async function startVpnEngine(server, protocol, configUri) {
                         startedAt: Date.now(),
                     });
                     mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
-                    electron_log_1.default.info("xray-core confirmed working (traffic verified) — marking as connected");
+                    electron_log_1.default.info("xray-core confirmed working (HTTP through proxy succeeded) — connected");
                 }
                 else if (!startupError) {
-                    electron_log_1.default.warn("xray process alive but traffic verification failed — NOT marking as connected");
+                    electron_log_1.default.warn("xray process alive but HTTP verification failed — NOT marking as connected");
                     store.set("vpn", {
                         connected: false,
                         server,
@@ -307,41 +306,133 @@ async function startVpnEngine(server, protocol, configUri) {
                         startedAt: null,
                     });
                     mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
-                    mainWindow?.webContents.send("vpn:error", "Tunnel started but traffic verification failed. The server may be unreachable or credentials may be invalid.");
+                    mainWindow?.webContents.send("vpn:error", "Tunnel started but HTTP request through proxy failed. The server may be unreachable or credentials may be invalid.");
                 }
             });
         }
     }, 5000);
-    // REAL traffic verification: fetch a public-IP endpoint through xray's SOCKS proxy.
-    // Returns true only if the request succeeds AND we get a valid response.
-    async function verifyTrafficFlows() {
-        const settings = store.get("settings");
-        const socksPort = 10808;
+    // Also remove the premature "started"/"listening" trigger that could
+    // mark connected before traffic verification completes.
+    // (Previously, xray logging "started" would immediately mark connected —
+    //  but that only means the inbound is ready, not that the outbound works.)
+    // REAL HTTP verification: do an actual GET request through xray's SOCKS5 proxy.
+    // This proves: (1) xray is running, (2) SOCKS inbound works, (3) the outbound
+    // to the VPN server works, (4) traffic actually flows to a real destination.
+    //
+    // We fetch https://www.cloudflare.com/cdn-cgi/trace which returns the exit IP.
+    // If we get a valid response, the tunnel is verified working.
+    async function verifyHttpThroughProxy() {
         try {
-            // Use Node's built-in fetch with SOCKS proxy via socks-proxy-agent if available.
-            // For now, we use a simpler check: try to connect to xray's SOCKS port and verify
-            // it accepts a connection. If the port is open, xray's inbound is working.
+            // Use the SocksProxyAgent pattern: create a SOCKS5 connection to 127.0.0.1:10808,
+            // then do an HTTP CONNECT through it.
+            // Node.js 20+ has built-in support via undici, but for simplicity we
+            // use a manual TCP socket check + assume HTTP works if SOCKS accepts.
+            //
+            // For a TRUE HTTP verification, we'd need socks-proxy-agent package.
+            // Since we can't add deps mid-build, we do a 2-step check:
+            //   1. SOCKS port accepts connections (xray inbound ready)
+            //   2. Try to fetch through the proxy (proves outbound works)
             const net = require("net");
-            return await new Promise((resolve) => {
+            // Step 1: Check SOCKS port
+            const socksOk = await new Promise((resolve) => {
                 const socket = new net.Socket();
-                const t = setTimeout(() => {
-                    socket.destroy();
-                    resolve(false);
-                }, 3000);
+                const t = setTimeout(() => { socket.destroy(); resolve(false); }, 3000);
                 socket.setTimeout(3000);
                 socket.once("connect", () => {
                     clearTimeout(t);
                     socket.destroy();
-                    electron_log_1.default.info("Traffic verification: SOCKS port reachable — tunnel is up");
                     resolve(true);
                 });
                 socket.once("error", (err) => {
                     clearTimeout(t);
-                    electron_log_1.default.warn(`Traffic verification failed: SOCKS port not reachable — ${err?.message}`);
+                    electron_log_1.default.warn(`SOCKS port check failed: ${err?.message}`);
                     resolve(false);
                 });
-                socket.connect(socksPort, "127.0.0.1");
+                socket.connect(10808, "127.0.0.1");
             });
+            if (!socksOk) {
+                electron_log_1.default.warn("Traffic verification: SOCKS port not reachable");
+                return false;
+            }
+            electron_log_1.default.info("Traffic verification: SOCKS port reachable");
+            // Step 2: Try a real HTTP request through the SOCKS proxy.
+            // We use fetch() with a custom dispatcher if available, otherwise
+            // fall back to the SOCKS port check only.
+            try {
+                // Attempt to use the global fetch with SOCKS — this may not work
+                // without socks-proxy-agent, but we try a direct TCP CONNECT.
+                // If it fails, we still have the SOCKS port check above.
+                const { connect: tlsConnect } = await Promise.resolve().then(() => __importStar(require("tls")));
+                // Create a SOCKS5 handshake manually
+                const socksSocket = new net.Socket();
+                await new Promise((resolve, reject) => {
+                    socksSocket.connect(10808, "127.0.0.1", resolve);
+                    socksSocket.on("error", reject);
+                });
+                // SOCKS5 greeting: version 5, 1 auth method, no auth
+                socksSocket.write(Buffer.from([0x05, 0x01, 0x00]));
+                await new Promise((resolve) => {
+                    socksSocket.once("data", () => resolve());
+                });
+                // Resolve cloudflare.com IP (we'll connect to 104.16.0.0 range)
+                // For simplicity, use www.cloudflare.com's known IP
+                const targetHost = "www.cloudflare.com";
+                const targetPort = 443;
+                // SOCKS5 CONNECT request
+                const hostBytes = Buffer.from(targetHost);
+                const connectReq = Buffer.concat([
+                    Buffer.from([0x05, 0x01, 0x00, 0x03]), // ver, connect, rsv, domain
+                    Buffer.from([hostBytes.length]),
+                    hostBytes,
+                    Buffer.from([(targetPort >> 8) & 0xff, targetPort & 0xff]),
+                ]);
+                socksSocket.write(connectReq);
+                await new Promise((resolve, reject) => {
+                    const timeout = setTimeout(() => reject(new Error("SOCKS connect timeout")), 8000);
+                    socksSocket.once("data", (data) => {
+                        clearTimeout(timeout);
+                        if (data[1] === 0x00) {
+                            resolve(); // connected
+                        }
+                        else {
+                            reject(new Error(`SOCKS connect failed: ${data[1]}`));
+                        }
+                    });
+                });
+                // Wrap in TLS
+                const tlsSocket = tlsConnect({
+                    socket: socksSocket,
+                    servername: targetHost,
+                });
+                await new Promise((resolve, reject) => {
+                    tlsSocket.once("secureConnect", resolve);
+                    tlsSocket.once("error", reject);
+                });
+                // Send HTTP request
+                tlsSocket.write("GET /cdn-cgi/trace HTTP/1.1\r\nHost: www.cloudflare.com\r\nConnection: close\r\n\r\n");
+                const response = await new Promise((resolve, reject) => {
+                    let data = "";
+                    tlsSocket.on("data", (chunk) => { data += chunk.toString(); });
+                    tlsSocket.on("end", () => resolve(data));
+                    tlsSocket.on("error", reject);
+                    setTimeout(() => resolve(data), 5000); // timeout
+                });
+                tlsSocket.destroy();
+                socksSocket.destroy();
+                if (response.includes("ip=")) {
+                    electron_log_1.default.info("Traffic verification: got valid response through SOCKS proxy — tunnel verified");
+                    return true;
+                }
+                else {
+                    electron_log_1.default.warn("Traffic verification: SOCKS connected but no valid HTTP response");
+                    return false;
+                }
+            }
+            catch (httpErr) {
+                electron_log_1.default.warn(`Traffic verification: HTTP through SOCKS failed: ${httpErr?.message}`);
+                // SOCKS port is open but HTTP failed — server may be unreachable
+                return false;
+            }
         }
         catch (e) {
             electron_log_1.default.warn(`Traffic verification error: ${e?.message}`);
@@ -351,22 +442,10 @@ async function startVpnEngine(server, protocol, configUri) {
     vpnProcess.stdout?.on("data", (data) => {
         const line = data.toString().trim();
         electron_log_1.default.info(`[xray] ${line}`);
-        // xray logs "started" when the proxy is ready to accept connections
-        if (line.includes("started") || line.includes("listening") || line.includes("tun:")) {
-            if (!handshakeConfirmed) {
-                handshakeConfirmed = true;
-                clearTimeout(startupTimeout);
-                store.set("vpn", {
-                    connected: true,
-                    server,
-                    protocol,
-                    configUri: configUri ?? null,
-                    startedAt: Date.now(),
-                });
-                mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
-                electron_log_1.default.info("xray-core handshake confirmed — connected");
-            }
-        }
+        // NOTE: We do NOT mark "connected" here just because xray logs "started".
+        // "started" only means the inbound proxy is ready — it does NOT prove the
+        // outbound to the VPN server works. We wait for the 5s timeout to do a
+        // real HTTP request through the proxy (see verifyHttpThroughProxy above).
     });
     vpnProcess.stderr?.on("data", (data) => {
         const line = data.toString().trim();
@@ -461,17 +540,51 @@ async function enableKillSwitch() {
     try {
         electron_log_1.default.info("Kill switch: blocking all outbound traffic via Windows Firewall…");
         const { exec } = require("child_process");
-        // Add a block-all rule for outbound traffic
-        // (xray's TUN interface will be excluded automatically since it has its own routing)
+        // Get the VPN server IP so we can EXCLUDE it from the block rule.
+        // This is critical: if we block the VPN server too, the tunnel can't
+        // reconnect and the user is stuck with no internet.
+        const vpnServer = store.get("vpn.server");
+        const vpnHost = vpnServer?.host || "";
+        let vpnIp = "";
+        if (vpnHost) {
+            try {
+                const { lookup } = require("dns").promises || require("dns");
+                const addresses = await (require("dns").promises?.lookup(vpnHost, { all: true }) || Promise.resolve([]));
+                if (Array.isArray(addresses) && addresses.length > 0) {
+                    vpnIp = addresses[0].address;
+                    electron_log_1.default.info(`Kill switch: VPN server ${vpnHost} resolves to ${vpnIp} — will be excluded from block`);
+                }
+            }
+            catch (e) {
+                electron_log_1.default.warn(`Kill switch: could not resolve VPN server IP: ${e.message}`);
+            }
+        }
+        // Add a block-all rule for outbound traffic, EXCLUDING the VPN server.
+        // We use a "block all" rule, then add a separate "allow" rule for the VPN server.
         await new Promise((resolve) => {
-            exec('netsh advfirewall firewall add rule name="DISTORT-KillSwitch-Block" dir=out action=block enable=yes', (err, stdout, stderr) => {
+            exec('netsh advfirewall firewall add rule name="DISTORT-KillSwitch-Block" dir=out action=block enable=yes', (err) => {
                 if (err) {
-                    electron_log_1.default.warn(`Kill switch: netsh command failed (need admin?): ${err.message}`);
+                    electron_log_1.default.warn(`Kill switch: netsh block command failed (need admin?): ${err.message}`);
                     resolve();
+                    return;
+                }
+                electron_log_1.default.info("Kill switch: outbound traffic blocked");
+                // Add an ALLOW rule for the VPN server IP so the tunnel can reconnect
+                if (vpnIp) {
+                    exec(`netsh advfirewall firewall add rule name="DISTORT-KillSwitch-AllowVPN" dir=out action=allow remoteip=${vpnIp} enable=yes`, (err2) => {
+                        if (err2) {
+                            electron_log_1.default.warn(`Kill switch: could not add VPN allow rule: ${err2.message}`);
+                        }
+                        else {
+                            electron_log_1.default.info(`Kill switch: VPN server ${vpnIp} excluded from block`);
+                        }
+                        killSwitchActive = true;
+                        mainWindow?.webContents.send("vpn:kill-switch-activated");
+                        resolve();
+                    });
                 }
                 else {
                     killSwitchActive = true;
-                    electron_log_1.default.info("Kill switch: outbound traffic blocked");
                     mainWindow?.webContents.send("vpn:kill-switch-activated");
                     resolve();
                 }
@@ -486,18 +599,16 @@ async function disableKillSwitch() {
     if (!killSwitchActive)
         return;
     try {
-        electron_log_1.default.info("Kill switch: removing firewall block rule…");
+        electron_log_1.default.info("Kill switch: removing firewall block rules…");
         const { exec } = require("child_process");
+        // Remove BOTH the block rule and the VPN allow rule
         await new Promise((resolve) => {
-            exec('netsh advfirewall firewall delete rule name="DISTORT-KillSwitch-Block"', (err) => {
-                if (err) {
-                    electron_log_1.default.warn(`Kill switch: failed to remove rule: ${err.message}`);
-                }
-                else {
+            exec('netsh advfirewall firewall delete rule name="DISTORT-KillSwitch-Block"', () => {
+                exec('netsh advfirewall firewall delete rule name="DISTORT-KillSwitch-AllowVPN"', () => {
                     killSwitchActive = false;
-                    electron_log_1.default.info("Kill switch: traffic restored");
-                }
-                resolve();
+                    electron_log_1.default.info("Kill switch: traffic restored (both rules removed)");
+                    resolve();
+                });
             });
         });
     }
