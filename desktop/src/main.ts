@@ -594,17 +594,6 @@ async function enableKillSwitch(): Promise<void> {
 
     log.info(`Kill switch: gateway=${savedDefaultGateway}, iface=${savedInterfaceIndex}, ip=${routeInfo.ifaceIp}`);
 
-    // Persist route info to disk for crash recovery
-    const routeBackupFile = path.join(app.getPath("userData"), "killswitch-backup.json");
-    fs.writeFileSync(routeBackupFile, JSON.stringify({
-      gateway: savedDefaultGateway,
-      interfaceIndex: savedInterfaceIndex,
-      interfaceIp: routeInfo.ifaceIp,
-      metric: savedDefaultMetric,
-      timestamp: Date.now(),
-    }));
-    log.info(`Kill switch: route info saved (gateway=${savedDefaultGateway}, iface=${savedInterfaceIndex}, metric=${savedDefaultMetric})`);
-
     // Step 2: Get the VPN server IP
     // CRITICAL: If we can't resolve the VPN server IP, we MUST NOT remove
     // the default route — otherwise the tunnel can't reconnect and the user
@@ -631,22 +620,47 @@ async function enableKillSwitch(): Promise<void> {
       return;
     }
 
+    // NOW we have all the info — persist route info to disk for crash recovery
+    const routeBackupFile = path.join(app.getPath("userData"), "killswitch-backup.json");
+    fs.writeFileSync(routeBackupFile, JSON.stringify({
+      gateway: savedDefaultGateway,
+      interfaceIndex: savedInterfaceIndex,
+      interfaceIp: routeInfo.ifaceIp,
+      metric: savedDefaultMetric,
+      vpnIp: vpnIp, // CRITICAL: save VPN server IP so crash recovery can delete its route
+      timestamp: Date.now(),
+    }));
+    log.info(`Kill switch: route info saved (gateway=${savedDefaultGateway}, iface=${savedInterfaceIndex}, metric=${savedDefaultMetric}, vpnIp=${vpnIp})`);
+
     // Step 3: Add a specific route for the VPN server (high priority)
-    // This must be done BEFORE removing the default route
-    await new Promise<void>((resolve) => {
+    // This must be done BEFORE removing the default route.
+    // CRITICAL: If this fails, we MUST NOT remove the default route —
+    // otherwise the tunnel can't reconnect and the user loses internet.
+    const vpnRouteAdded = await new Promise<boolean>((resolve) => {
       exec(
         `route add ${vpnIp} mask 255.255.255.255 ${savedDefaultGateway} metric 1 IF ${savedInterfaceIndex}`,
         (err) => {
           if (err) {
             log.error(`Kill switch: ABORTED — could not add VPN server route: ${err.message}`);
             log.error("Kill switch: Without this route, removing default route would break reconnection.");
+            resolve(false);
           } else {
             log.info(`Kill switch: VPN server ${vpnIp} route added (metric 1)`);
+            resolve(true);
           }
-          resolve();
         }
       );
     });
+
+    if (!vpnRouteAdded) {
+      // VPN route failed — DO NOT remove default route
+      // Delete the backup file since kill switch didn't actually activate
+      try {
+        const routeBackupFile = path.join(app.getPath("userData"), "killswitch-backup.json");
+        if (fs.existsSync(routeBackupFile)) fs.unlinkSync(routeBackupFile);
+      } catch {}
+      return; // ABORT — don't proceed to step 4
+    }
 
     // Step 4: Remove the default route (blocks all other traffic)
     await new Promise<void>((resolve) => {
