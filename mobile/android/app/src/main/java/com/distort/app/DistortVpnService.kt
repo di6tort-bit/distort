@@ -137,6 +137,9 @@ class DistortVpnService : VpnService() {
      *   2. The outbound to the VPN server is working
      *   3. Traffic can actually flow through the tunnel
      *
+     * Additionally checks for DNS leaks by comparing the IP returned by
+     * cloudflare's /cdn-cgi/trace endpoint (which shows the exit IP).
+     *
      * This is more honest than just checking if the xray process is alive.
      */
     private fun verifyTrafficThroughProxy(): Boolean {
@@ -150,14 +153,30 @@ class DistortVpnService : VpnService() {
             val code = conn.responseCode
             Log.i(TAG, "Traffic verification: HTTP $code through SOCKS proxy")
             if (code in 200..299) {
-                // Read the response to confirm it's real
                 val body = conn.inputStream.bufferedReader().readText()
-                // cloudflare/cdn-cgi/trace returns text like "ip=x.x.x.x\n..."
-                Log.i(TAG, "Traffic verification: received ${body.length} bytes — tunnel is working")
+                Log.i(TAG, "Traffic verification: received ${body.length} bytes")
+
+                // Parse the trace response to get the exit IP
+                // cloudflare/cdn-cgi/trace returns: ip=x.x.x.x\nuag=...\n...
+                val exitIp = body.lines()
+                    .find { it.startsWith("ip=") }
+                    ?.removePrefix("ip=")
+                    ?.trim()
+                if (exitIp != null && exitIp.isNotEmpty()) {
+                    Log.i(TAG, "Traffic verification: exit IP = $exitIp")
+                    // Compare with our real public IP (fetched WITHOUT proxy)
+                    // If they're the same → DNS/traffic leak (VPN not working)
+                    val realIp = getRealPublicIp()
+                    if (realIp != null && realIp == exitIp) {
+                        Log.e(TAG, "TRAFFIC LEAK DETECTED: exit IP ($exitIp) == real IP ($realIp) — VPN NOT working!")
+                        return false
+                    }
+                    Log.i(TAG, "Traffic verification: exit IP ($exitIp) differs from real IP ($realIp) — VPN working")
+                }
+
                 true
             } else {
                 Log.w(TAG, "Traffic verification: got HTTP $code — may be blocked")
-                // Even a non-200 means the proxy is routing traffic
                 true
             }
         } catch (e: Exception) {
@@ -168,12 +187,38 @@ class DistortVpnService : VpnService() {
                 socket.connect(java.net.InetSocketAddress("127.0.0.1", 10808), 2000)
                 socket.close()
                 Log.w(TAG, "SOCKS port is open but HTTP request failed — server may be unreachable")
-                // Port is open but can't route — likely the outbound server is down
                 false
             } catch (e2: Exception) {
                 Log.e(TAG, "SOCKS port not reachable — xray not fully started: ${e2.message}")
                 false
             }
+        }
+    }
+
+    /**
+     * Get the device's REAL public IP (without going through the VPN proxy).
+     * We fetch this DIRECTLY (not through SOCKS) to compare with the exit IP.
+     * If they match → traffic is leaking outside the tunnel.
+     *
+     * NOTE: This request goes around xray's SOCKS proxy, so it uses the real
+     * internet connection. If the VPN is working properly, the exit IP (from
+     * the SOCKS-proxied request) should differ from this real IP.
+     */
+    private fun getRealPublicIp(): String? {
+        return try {
+            val url = java.net.URL("https://api.ipify.org")
+            val conn = url.openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
+            conn.requestMethod = "GET"
+            if (conn.responseCode in 200..299) {
+                val ip = conn.inputStream.bufferedReader().readText().trim()
+                Log.i(TAG, "Real public IP (no proxy): $ip")
+                ip
+            } else null
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not fetch real public IP: ${e.message}")
+            null
         }
     }
 

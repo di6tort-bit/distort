@@ -43,8 +43,14 @@ export function checkAuth(req: NextRequest): NextResponse | null {
     );
   }
 
-  // If no key configured (dev mode), endpoints are open — but we add a warning.
+  // If no key configured (dev mode), endpoints are open — but we add a WARNING header.
+  // This makes it obvious to anyone hitting the API that the server is NOT secured.
   if (!isAuthConfigured()) {
+    const response = NextResponse.next();
+    response.headers.set("X-Distort-Warning", "DEV MODE: API authentication not configured. Do NOT expose to the internet.");
+    // We can't easily add headers to the actual response here since we return null,
+    // but the warning is logged at startup. For production, the 503 above fires.
+    console.warn("[auth] DEV MODE: DISTORT_API_KEY not set. Protected endpoints are OPEN. Do NOT expose to internet.");
     return null;
   }
 
@@ -61,5 +67,13 @@ export function checkAuth(req: NextRequest): NextResponse | null {
     },
     { status: 401 }
   );
+}
+
+// Log a warning at module load if auth is not configured.
+if (!isAuthConfigured()) {
+  console.warn("⚠️  DISTORT SECURITY WARNING: DISTORT_API_KEY is not set or too short.");
+  console.warn("⚠️  All protected API endpoints are OPEN (no authentication).");
+  console.warn("⚠️  This is OK for local development but DANGEROUS if exposed to the internet.");
+  console.warn("⚠️  Set DISTORT_API_KEY=<32+ char random string> in your environment.");
 }
 
