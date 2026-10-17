@@ -234,10 +234,9 @@ class DistortVpnService : VpnService() {
             }
             socket.connect(java.net.InetSocketAddress("api.ipify.org", 443), 5000)
 
-            // Start TLS
-            val sslSocket = javax.net.ssl.SSLSocketFactory.getDefault().createSocket(
-                socket, "api.ipify.org", 443, true
-            ) as javax.net.ssl.SSLSocket
+            // Start TLS over the existing socket
+            val sslSocket = (javax.net.ssl.SSLSocketFactory.getDefault() as javax.net.ssl.SSLSocketFactory)
+                .createSocket(socket, "api.ipify.org", 443, true) as javax.net.ssl.SSLSocket
             sslSocket.startHandshake()
 
             // Send HTTP request
@@ -263,7 +262,7 @@ class DistortVpnService : VpnService() {
             Log.w(TAG, "getRealPublicIpProtected failed: ${e.message}")
             null
         } finally {
-            try { socket?.close() } catch {}
+            try { socket?.close() } catch (_: Exception) {}
         }
     }
 
