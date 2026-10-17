@@ -22,6 +22,9 @@ jobs:
       - name: Install desktop deps
         working-directory: desktop
         run: bun install
+      - name: Rebuild native modules for Electron
+        working-directory: desktop
+        run: bunx electron-rebuild -f -w better-sqlite3
       - name: Generate icons
         working-directory: desktop
         run: bun run build-icons.mjs

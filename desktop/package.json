@@ -117,6 +117,7 @@
     }
   },
   "dependencies": {
+    "better-sqlite3": "^13.0.3",
     "electron-log": "^5.2.0",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.8.9",

@@ -10,6 +10,7 @@ import { URL } from "url";
 import { spawn, ChildProcess } from "child_process";
 import Store from "electron-store";
 import log from "electron-log";
+import { initDatabase } from "./db-init";
 
 // ---------------------------------------------------------------------------
 // Logging — configure early so we capture errors during startup.
@@ -2239,37 +2240,23 @@ function startNextServer(): Promise<void> {
     }
     log.info(`Database path: ${dbPath}`);
 
-    // First run: create the database schema using Prisma's binary.
-    // Prisma generates a migration engine binary alongside the query engine.
-    // We use `prisma db push` to create all tables from schema.prisma.
+    // First run: create the database schema + seed data.
+    // Uses better-sqlite3 (native, synchronous) to execute the SQL schema
+    // file that's bundled with the app. This is more reliable than trying
+    // to run `prisma db push` (which requires the full Prisma CLI binary
+    // that's NOT bundled in the standalone build).
     if (!fs.existsSync(dbPath)) {
-      log.info("First run — creating database schema via prisma db push…");
+      log.info("First run — initializing database schema + seed data…");
       try {
-        const prismaBin = path.join(standalonePath, "node_modules", "prisma", "build", "index.js");
-        // Fallback: look in the app's node_modules
-        const prismaBinAlt = path.join(app.getAppPath(), "node_modules", "prisma", "build", "index.js");
-        const prismaBinFinal = fs.existsSync(prismaBin) ? prismaBin : prismaBinAlt;
-
-        if (fs.existsSync(prismaBinFinal)) {
-          const { execFileSync } = require("child_process");
-          execFileSync(process.execPath, [prismaBinFinal, "db", "push", "--accept-data-loss"], {
-            cwd: standalonePath,
-            env: {
-              ...process.env,
-              ELECTRON_RUN_AS_NODE: "1",
-              DATABASE_URL: `file:${dbPath}`,
-            },
-            stdio: ["ignore", "pipe", "pipe"],
-            timeout: 30000,
-          });
-          log.info("Database schema created successfully");
-        } else {
-          log.warn("Prisma binary not found — database will be created on first query (may fail)");
-        }
+        initDatabase(dbPath);
+        log.info("Database initialized successfully");
       } catch (e: any) {
-        log.error(`Failed to create database schema: ${e?.message}`);
-        // Non-fatal — the server might still work if it creates tables on-the-fly
+        log.error(`Database initialization failed: ${e?.message}`);
+        // Non-fatal — the Next.js server might still start, but DB queries will fail.
+        // The user will see a clear error in the logs.
       }
+    } else {
+      log.info("Database already exists — skipping initialization");
     }
 
     nextServer = spawnChild(process.execPath, [serverJs], {
