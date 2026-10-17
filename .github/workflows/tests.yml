@@ -1,0 +1,38 @@
+name: Tests — Config Parser + Xray Validation
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-configs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v1
+        with: { bun-version: latest }
+
+      - name: Install deps
+        run: bun install
+
+      - name: Run config parser tests
+        run: bun run src/lib/__tests__/config-parser.test.ts
+
+      - name: Run xray config validation tests (JSON structure)
+        run: bun run src/lib/__tests__/xray-config.test.ts
+
+      - name: Download xray binary for validation
+        run: |
+          curl -fsSL -o /tmp/xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-linux-64.zip
+          unzip -o /tmp/xray.zip -d /tmp/xray-tmp
+          chmod +x /tmp/xray-tmp/xray
+          cp /tmp/xray-tmp/xray /tmp/xray
+          chmod +x /tmp/xray
+          echo "XRAY_BIN_PATH=/tmp/xray" >> $GITHUB_ENV
+
+      - name: Run xray run -test validation (with real binary)
+        run: bun run src/lib/__tests__/xray-config.test.ts
+        env:
+          XRAY_BIN_PATH: /tmp/xray
