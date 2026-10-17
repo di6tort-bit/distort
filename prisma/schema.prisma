@@ -172,6 +172,28 @@ model User {
   referral  String?
   /// Admin-granted: bypass all limits, can grant VIP to others
   isAdmin   Boolean  @default(false)
+  /// Who approved this admin (null = self-appointed founder)
+  approvedBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Messages sent by users/visitors to the admin panel.
+/// Types: "vip_request" (subscription), "collaboration" (partnership), "support" (help), "bug_report"
+model AdminMessage {
+  id        String   @id @default(cuid())
+  type      String   @default("support")
+  name      String
+  email     String
+  subject   String
+  message   String
+  /// "pending" = new, "read" = seen by admin, "replied" = answered, "archived" = dismissed
+  status    String   @default("pending")
+  /// Admin reply (if any)
+  reply     String?
+  repliedAt DateTime?
+  /// Which admin handled this
+  handledBy String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
