@@ -75,7 +75,7 @@ class UpdateChecker(private val activity: Activity) {
         // large (currently ~77MB) so we use a long read timeout for that.
         private const val CONNECT_TIMEOUT_MS = 10_000
         private const val API_READ_TIMEOUT_MS = 15_000
-        private const val APK_READ_TIMEOUT_MS = 5 * 60 * 1000L
+        private const val APK_READ_TIMEOUT_MS = 300_000 // 5 minutes (Int, not Long — HttpURLConnection expects Int)
 
         // The cache subdirectory where downloaded APKs land. MUST match a
         // <cache-path> entry in res/xml/file_paths.xml or FileProvider
