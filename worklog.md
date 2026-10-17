@@ -650,3 +650,52 @@ Stage Summary:
   - src/lib/emergency-connectivity/types.ts (added `candidateLabel?: string` to RecoveryAttempt)
   - src/lib/emergency-connectivity/state-machine.ts (added defensive `diagnosing → exhausted` on `no-candidates-left`)
 - Next steps for downstream agents: ship a minimal Electron desktop companion that actually exposes 127.0.0.1:10809/api/tunnel/start + /api/tunnel/verify + /api/tunnel/stop + /api/health (spawning xray-core). Once that exists, the existing UI will automatically flip to "browser-with-companion" and the engine will actually verify tunnel traffic.
+
+---
+Task ID: EMERGENCY-CLIENT-ENGINE
+Agent: main (orchestrator)
+Task: Build REAL client-side Emergency Connectivity engine (no server dependency)
+
+Work Log:
+- Re-read the user's design doc which clarified: "the backend, in case it exists, can provide source info and service health, but should not decide instead of the real device test whether the tunnel works."
+- Audited the existing Emergency code: types.ts + state-machine.ts were already pure/correct, but planner.ts + the UI were server-side only (just fetched a plan and showed it — no actual recovery cycle).
+- Built the missing client-side pieces (the core of the user's design):
+  1. client-diagnostics.ts — REAL browser probes to domestic (iran.ir, aparat.com) + international (1.1.1.1, google, cloudflare) targets. Honest about browser limitations (no raw TCP, no CORS bypass).
+  2. local-config-store.ts — IndexedDB-backed storage for imported configs. Available offline (national internet scenario). Dedup by URI, success/failure streak tracking, favorite support.
+  3. recovery-engine.ts — the ACTUAL recovery loop. TunnelEngine adapter pattern with 3 implementations:
+     - BrowserOnlyEngine: honest "cannot connect" (browser can't spawn xray)
+     - BrowserWithCompanionEngine: delegates to Distort Desktop app's control API at 127.0.0.1:10809
+     - createTunnelEngine(): auto-detects companion on startup
+  - recover() runs: diagnose → gather candidates (local + remote) → for each: connect → verify → (success: monitor health) | (fail: backoff + try next) → exhausted with honest reason
+  - Health monitoring every 30s after connected, auto-recovery on network change (Wi-Fi → mobile data)
+  - Reports each attempt to /api/emergency/report (best-effort, non-blocking)
+  - NEVER sets "connected" without real traffic verification (exit IP must differ from real IP)
+- Rewrote the UI (emergency-connectivity-view.tsx) to drive the real RecoveryEngine:
+  - Engine platform badge: auto-detects companion (red "browser-only" vs green "browser-with-companion")
+  - REAL client-side diagnosis card (not server-side estimate) — shows actual probe results
+  - Live state machine updates via onStatusChange callback
+  - Candidate paths show source (local IndexedDB vs remote API) + streaks
+  - Recovery log updates LIVE as attempts happen
+  - Import dialog saves to IndexedDB (offline-available)
+  - Danger zone: Wipe all local configs button
+- Fixed state-machine.ts: added defensive diagnosing→exhausted transition on no-candidates-left (engine emits this before diagnosis-complete when no base network)
+- Added candidateLabel to RecoveryAttempt type (engine + report API already used it)
+- Tested end-to-end via agent-browser:
+  - Diagnosis shows real results: "Base network: local-only. DNS: broken. International: blocked. Domestic (Iran): blocked. Direct latency: unreachable."
+  - Recover Connection → engine tries 1 local candidate → honest FAILURE "Engine browser-only cannot establish tunnels in this context" → state=EXHAUSTED (NOT fake connected)
+  - Import Config → validates structure + probes reachability + auto-saves to IndexedDB → "Stored in IndexedDB · available offline"
+  - Reports persist to server (POST /api/emergency/report 200)
+- Lint: 0 errors. TypeScript: 0 errors.
+- Committed as 4abf32b, pushed to main. CI: all 3 builds green (Tests + Android APK + Windows .exe).
+
+Stage Summary:
+- Emergency Connectivity now runs ENTIRELY client-side, per the user's design.
+- The server provides source info (subscription configs, service status) but does NOT decide if the tunnel works — the client does its own probing + connecting + verifying.
+- THREE honest outcomes instead of fake "connected":
+  1. Browser-only: engine diagnoses + validates + reports which candidates have valid structure + reachable servers, but cannot establish tunnel (honest "install desktop app")
+  2. Browser + desktop companion: engine delegates to companion's control API, does real traffic verification (exit IP vs real IP comparison)
+  3. Exhausted: all candidates tried, none verified — state=exhausted with clear reason + actionable advice
+- Local configs survive in IndexedDB across sessions (offline recovery available).
+- Health monitoring + auto-recovery on network change implemented.
+- Starlink remains a VIP-only stub (Phase 5) — NOT a dependency.
+- Acceptance criteria from design §10 now better met: honest failure reporting, no infinite loops, no fake connected, no credential leaks, real client-side testing.
