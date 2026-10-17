@@ -165,9 +165,13 @@ model User {
   id        String   @id @default(cuid())
   email     String   @unique
   name      String?
-  /// Plain "free" for now (100% free product)
+  /// "free" = community configs, "vip" = premium servers + priority + best speed
   tier      String   @default("free")
+  /// When VIP expires (null = never / admin-granted)
+  vipUntil  DateTime?
   referral  String?
+  /// Admin-granted: bypass all limits, can grant VIP to others
+  isAdmin   Boolean  @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

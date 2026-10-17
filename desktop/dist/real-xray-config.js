@@ -122,23 +122,15 @@ function buildRealXrayConfig(cfg, opts) {
             listen: "127.0.0.1",
             protocol: "tun",
             settings: {
-                // On Windows, wintun.dll must be in the same directory as xray.exe
-                // xray auto-detects and uses it. We don't need to specify the driver.
                 ip: "172.19.0.1",
-                // MTU for the TUN device
                 mtu: 1420,
-                // Route all traffic except the VPN server itself
                 routes: ["0.0.0.0/0", "::/0"],
-                // Exclude the VPN endpoint to avoid routing loops
                 excludeRoutes: [`${cfg.host}/32`],
-                // DNS hijacking — all DNS queries go through xray's internal DNS
                 hijackDns: dnsProtect,
-                // Auto-route — xray sets up the system routing table
                 autoRoute: true,
-                // Strict route — block any traffic that bypasses the tunnel
                 strictRoute: true,
             },
-            sniff: true,
+            sniffing: { enabled: true },
         });
     }
     // SOCKS5 inbound (for proxy-mode apps)
@@ -148,7 +140,7 @@ function buildRealXrayConfig(cfg, opts) {
         listen: "127.0.0.1",
         protocol: "socks",
         settings: { auth: "noauth", udp: true },
-        sniff: true,
+        sniffing: { enabled: true },
     });
     // HTTP proxy inbound
     inbounds.push({
@@ -156,7 +148,7 @@ function buildRealXrayConfig(cfg, opts) {
         port: httpPort,
         listen: "127.0.0.1",
         protocol: "http",
-        sniff: true,
+        sniffing: { enabled: true },
     });
     // Build the outbound with REAL credentials
     const outbound = buildRealOutbound(cfg);
@@ -165,21 +157,13 @@ function buildRealXrayConfig(cfg, opts) {
     return {
         log: {
             loglevel: "warning",
-            access: "", // stdout
-            error: "", // stderr
         },
         dns: dnsProtect
             ? {
                 servers: [
                     "1.1.1.1",
                     "9.9.9.9",
-                    {
-                        address: "8.8.8.8",
-                        domains: ["geosite:category-ads-all"],
-                        expectIPs: ["geoip:google"],
-                    },
                 ],
-                queryStrategy: "UseIP",
             }
             : undefined,
         inbounds,
@@ -190,14 +174,9 @@ function buildRealXrayConfig(cfg, opts) {
         ],
         routing: {
             domainStrategy: "IPIfNonMatch",
-            domainMatcher: "mph",
             rules: [
-                // Block ads + trackers
                 { type: "field", domain: ["geosite:category-ads-all"], outboundTag: "block" },
-                // Block private network leaks
                 { type: "field", ip: ["geoip:private"], outboundTag: "block" },
-                // DNS hijacking — route DNS queries to xray's internal resolver
-                { type: "field", inboundTag: ["tun-in"], port: 53, outboundTag: "dns-out" },
             ],
         },
     };

@@ -20,10 +20,15 @@ contextBridge.exposeInMainWorld("distort", {
       ipcRenderer.on("vpn:connecting", handler);
       return () => ipcRenderer.removeListener("vpn:connecting", handler);
     },
-    onReconnecting: (cb: (info: { attempt: number; maxAttempts: number; delayMs: number }) => void) => {
+    onReconnecting: (cb: (info: { attempt: number; maxAttempts: number; delayMs: number; lastCountry?: string }) => void) => {
       const handler = (_e: unknown, info: any) => cb(info);
       ipcRenderer.on("vpn:reconnecting", handler);
       return () => ipcRenderer.removeListener("vpn:reconnecting", handler);
+    },
+    onCountryChange: (cb: (info: { from: string; to: string; message: string }) => void) => {
+      const handler = (_e: unknown, info: any) => cb(info);
+      ipcRenderer.on("vpn:country-change", handler);
+      return () => ipcRenderer.removeListener("vpn:country-change", handler);
     },
     onExitInfo: (cb: (info: { exitIp: string; exitCountry: string }) => void) => {
       const handler = (_e: unknown, info: { exitIp: string; exitCountry: string }) => cb(info);

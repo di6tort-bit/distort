@@ -24,6 +24,11 @@ electron_1.contextBridge.exposeInMainWorld("distort", {
             electron_1.ipcRenderer.on("vpn:reconnecting", handler);
             return () => electron_1.ipcRenderer.removeListener("vpn:reconnecting", handler);
         },
+        onCountryChange: (cb) => {
+            const handler = (_e, info) => cb(info);
+            electron_1.ipcRenderer.on("vpn:country-change", handler);
+            return () => electron_1.ipcRenderer.removeListener("vpn:country-change", handler);
+        },
         onExitInfo: (cb) => {
             const handler = (_e, info) => cb(info);
             electron_1.ipcRenderer.on("vpn:exit-info", handler);

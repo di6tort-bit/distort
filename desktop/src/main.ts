@@ -496,8 +496,8 @@ async function startVpnEngine(server: VpnState["server"], protocol: string, conf
 async function stopVpnEngine(): Promise<void> {
   // Stop health monitoring when tunnel goes down
   stopHealthMonitoring();
-  // Reset reconnect attempts
-  reconnectAttempts = 0;
+  // NOTE: Do NOT reset reconnectAttempts here — that's done by smartReconnect
+  // only after SUCCESSFUL reconnection. Resetting here would allow infinite retries.
   log.info("Stopping xray-core…");
   if (vpnProcess) {
     try {
@@ -564,34 +564,44 @@ const MAX_RECONNECT_ATTEMPTS = 5;
 const HEALTH_CHECK_INTERVAL_MS = 30_000; // 30 seconds
 
 // Tunnel health monitoring — checks every 30s if the tunnel is still alive.
-// If the tunnel dies, triggers smart reconnect with exponential backoff.
+// If the tunnel dies:
+// 1. Auto-disconnect (user requested: "only when ping is lost, auto-disconnect")
+// 2. Try to reconnect to a SIMILAR country first
+// 3. If no similar country available, notify user where it will connect
 
 // Top-level reference to the verification function (defined inside startVpnEngine)
 let verifyHttpThroughProxyRef: (() => Promise<boolean>) | null = null;
+let lastConnectedCountry: string | null = null;
+let isReconnecting = false; // prevents concurrent reconnect attempts
 
 function startHealthMonitoring(): void {
   if (healthCheckTimer) clearInterval(healthCheckTimer);
 
   healthCheckTimer = setInterval(async () => {
     const vpnState = store.get("vpn");
-    if (!vpnState.connected) return; // not connected, nothing to monitor
+    if (!vpnState.connected) return;
+    if (isReconnecting) return; // already reconnecting, don't stack
 
     // Quick check: is xray process still alive?
     if (!vpnProcess || vpnProcess.killed) {
-      log.warn("Health check: xray process is dead — triggering reconnect");
-      await smartReconnect();
+      log.warn("Health check: xray process is dead — auto-disconnecting and reconnecting");
+      // Remember the country we were connected to
+      lastConnectedCountry = vpnState.exitCountry || vpnState.server?.country || null;
+      await smartReconnectWithCountryPreference();
       return;
     }
 
-    // Periodic traffic verification — use the ref set by startVpnEngine
+    // Periodic traffic verification
     if (verifyHttpThroughProxyRef) {
       try {
         const verified = await verifyHttpThroughProxyRef();
         if (!verified) {
-          log.warn("Health check: traffic verification failed — tunnel may be dead");
-          await smartReconnect();
+          log.warn("Health check: ping lost (no traffic through tunnel) — auto-disconnecting");
+          // User requested: "only when ping is lost, auto-disconnect and reconnect to similar country"
+          const currentVpn = store.get("vpn");
+          lastConnectedCountry = currentVpn.exitCountry || currentVpn.server?.country || null;
+          await smartReconnectWithCountryPreference();
         } else {
-          // Reset reconnect attempts on successful health check
           reconnectAttempts = 0;
         }
       } catch (e: any) {
@@ -611,69 +621,136 @@ function stopHealthMonitoring(): void {
   }
 }
 
-// Smart reconnect with exponential backoff:
-// Attempt 1: immediate
-// Attempt 2: 2s delay
-// Attempt 3: 4s delay
-// Attempt 4: 8s delay
-// Attempt 5: 16s delay
-// After 5 attempts: give up and notify user
-async function smartReconnect(): Promise<void> {
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    log.error(`Smart reconnect: max attempts (${MAX_RECONNECT_ATTEMPTS}) reached — giving up`);
-    store.set("vpn", {
-      ...store.get("vpn"),
-      connected: false,
-      startedAt: null,
-    });
-    mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
-    mainWindow?.webContents.send("vpn:error",
-      "Tunnel died and automatic reconnection failed after 5 attempts. " +
-      "The network may be heavily filtered. Please try Quick Connect again manually."
-    );
-    stopHealthMonitoring();
+// Smart reconnect with COUNTRY PREFERENCE:
+// 1. Try configs from the SAME country as the last connection
+// 2. If none available, pick best available and NOTIFY user
+// 3. Uses exponential backoff (1s, 2s, 4s, 8s, 16s)
+// 4. Max 5 attempts
+async function smartReconnectWithCountryPreference(): Promise<void> {
+  if (isReconnecting) {
+    log.info("Smart reconnect: already in progress — skipping");
     return;
   }
+  isReconnecting = true;
 
-  reconnectAttempts++;
-  const delay = Math.pow(2, reconnectAttempts - 1) * 1000; // 1s, 2s, 4s, 8s, 16s
-  // Add jitter (±25%) to avoid thundering herd
-  const jitter = delay * (0.75 + Math.random() * 0.5);
-  const actualDelay = Math.round(jitter);
-
-  log.info(`Smart reconnect: attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${actualDelay}ms`);
-
-  // Notify UI
-  mainWindow?.webContents.send("vpn:reconnecting", {
-    attempt: reconnectAttempts,
-    maxAttempts: MAX_RECONNECT_ATTEMPTS,
-    delayMs: actualDelay,
-  });
-
-  // Wait with backoff
-  await new Promise((r) => setTimeout(r, actualDelay));
-
-  // Stop current tunnel
-  await stopVpnEngine();
-  await disableKillSwitch();
-
-  // Try to reconnect using quickConnect (which has its own failover)
-  log.info(`Smart reconnect: attempting reconnection (attempt ${reconnectAttempts})`);
-  await quickConnect();
-
-  // Check if reconnection succeeded
-  const vpnState = store.get("vpn");
-  if (vpnState.connected) {
-    log.info(`Smart reconnect: SUCCESS on attempt ${reconnectAttempts}`);
-    reconnectAttempts = 0;
-    startHealthMonitoring(); // restart monitoring
-  } else {
-    log.warn(`Smart reconnect: attempt ${reconnectAttempts} failed — will retry`);
-    // smartReconnect will be called again by the health monitor (which we restart)
-    // OR we recurse if health monitor isn't running
-    if (!healthCheckTimer) {
-      await smartReconnect();
+  try {
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      log.error(`Smart reconnect: max attempts (${MAX_RECONNECT_ATTEMPTS}) reached — giving up`);
+      store.set("vpn", {
+        ...store.get("vpn"),
+        connected: false,
+        startedAt: null,
+      });
+      mainWindow?.webContents.send("vpn:state-changed", store.get("vpn"));
+      mainWindow?.webContents.send("vpn:error",
+        "Tunnel died and automatic reconnection failed after 5 attempts. " +
+        "The network may be heavily filtered. Please try Quick Connect again manually."
+      );
+      stopHealthMonitoring();
+      return;
     }
+
+    reconnectAttempts++;
+    const delay = Math.pow(2, reconnectAttempts - 1) * 1000;
+    const jitter = delay * (0.75 + Math.random() * 0.5);
+    const actualDelay = Math.round(jitter);
+
+    log.info(`Smart reconnect: attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${actualDelay}ms (last country: ${lastConnectedCountry || "unknown"})`);
+
+    mainWindow?.webContents.send("vpn:reconnecting", {
+      attempt: reconnectAttempts,
+      maxAttempts: MAX_RECONNECT_ATTEMPTS,
+      delayMs: actualDelay,
+      lastCountry: lastConnectedCountry,
+    });
+
+    await new Promise((r) => setTimeout(r, actualDelay));
+
+    // Stop current tunnel
+    await stopVpnEngine();
+    await disableKillSwitch();
+
+    // Get configs and sort by country preference
+    const meshUrl = `${getLoadUrl()}/api/imported-configs?bucket=optimized&limit=50`;
+    const meshRes = await fetch(meshUrl);
+    const meshData: any = await meshRes.json();
+    let configs = meshData?.configs || [];
+
+    if (configs.length === 0) {
+      // Try cached configs (national internet scenario)
+      try {
+        const cacheFile = path.join(app.getPath("userData"), "cached-configs.json");
+        if (fs.existsSync(cacheFile)) {
+          const cached = JSON.parse(fs.readFileSync(cacheFile, "utf-8"));
+          configs = cached.configs || [];
+          log.info(`Smart reconnect: using ${configs.length} cached configs (subscription URL unreachable)`);
+        }
+      } catch {}
+    }
+
+    if (configs.length === 0) {
+      log.error("Smart reconnect: no configs available at all");
+      mainWindow?.webContents.send("vpn:error", "No VPN configs available. Network may be completely blocked.");
+      return;
+    }
+
+    // Sort configs: same country first, then by score
+    const sameCountry = configs.filter((c: any) =>
+      lastConnectedCountry && (c.country === lastConnectedCountry || c.country?.includes(lastConnectedCountry))
+    );
+    const otherCountry = configs.filter((c: any) =>
+      !lastConnectedCountry || !(c.country === lastConnectedCountry || c.country?.includes(lastConnectedCountry))
+    );
+
+    // If we have same-country configs, try those first
+    const sortedConfigs = [...sameCountry, ...otherCountry].slice(0, 10);
+
+    if (sameCountry.length > 0) {
+      log.info(`Smart reconnect: trying ${sameCountry.length} configs from same country (${lastConnectedCountry})`);
+    } else {
+      // No similar country — notify user where we'll connect
+      const firstConfig = sortedConfigs[0];
+      const targetCountry = firstConfig?.country || "unknown";
+      log.info(`Smart reconnect: no configs from ${lastConnectedCountry} — will connect to ${targetCountry}`);
+      mainWindow?.webContents.send("vpn:country-change", {
+        from: lastConnectedCountry,
+        to: targetCountry,
+        message: `No servers available in ${lastConnectedCountry}. Connecting to ${targetCountry} instead.`,
+      });
+    }
+
+    // Try each config
+    for (let i = 0; i < sortedConfigs.length; i++) {
+      const cfg = sortedConfigs[i];
+      log.info(`Smart reconnect: trying config ${i + 1}/${sortedConfigs.length} — ${cfg.protocol} ${cfg.host}:${cfg.port} (${cfg.country || "?"})`);
+
+      const server: VpnState["server"] = {
+        code: cfg.host,
+        country: cfg.country || cfg.host,
+        host: cfg.host,
+        port: cfg.port,
+      };
+
+      await disableKillSwitch();
+      try {
+        await startVpnEngine(server, cfg.protocol, cfg.uri);
+        await new Promise((r) => setTimeout(r, 7000));
+        const vpnState = store.get("vpn");
+        if (vpnState.connected) {
+          log.info(`Smart reconnect: SUCCESS on attempt ${reconnectAttempts} via ${cfg.host} (${cfg.country})`);
+          reconnectAttempts = 0;
+          startHealthMonitoring();
+          return;
+        }
+      } catch (e: any) {
+        log.warn(`Smart reconnect: config ${i + 1} failed: ${e?.message}`);
+      }
+      await stopVpnEngine();
+    }
+
+    log.warn(`Smart reconnect: attempt ${reconnectAttempts} failed — will retry`);
+  } finally {
+    isReconnecting = false;
   }
 }
 
