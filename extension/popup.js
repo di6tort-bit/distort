@@ -1,21 +1,22 @@
 // popup.js — Distort popup logic (MV3)
 // Manages UI state, chrome.storage.local persistence, and messaging the service worker.
+//
+// IMPORTANT: This extension is a BROWSER-LEVEL PROXY, not a system VPN.
+// The server list below is EMPTY by default — you must add your own SOCKS5 proxy
+// or use the Distort desktop app for real VPN tunneling.
+//
+// Why? VLESS/VMess/Trojan/Shadowsocks protocols are NOT SOCKS5 proxies — they
+// need a local client (xray-core) to convert them. The Chrome extension can't
+// run xray itself, so it can only use real SOCKS5/HTTP proxies.
+//
+// To use real VPN protocols, install the Distort desktop app (which bundles xray).
+// The extension is for users who already have a SOCKS5 proxy and want browser-only
+// routing.
 
-// --- Hard-coded server list (12 representative stealth nodes) -----------------
-const SERVERS = [
-  { id: 'de-fra-01', country: 'Germany',       city: 'Frankfurt',  flag: '🇩🇪', host: 'de-fra-01.distort.net', port: 8443, ping: 38,  load: 42, stealth: true  },
-  { id: 'nl-ams-01', country: 'Netherlands',    city: 'Amsterdam',  flag: '🇳🇱', host: 'nl-ams-01.distort.net', port: 8443, ping: 44,  load: 51, stealth: true  },
-  { id: 'fi-hel-01', country: 'Finland',        city: 'Helsinki',   flag: '🇫🇮', host: 'fi-hel-01.distort.net', port: 8443, ping: 58,  load: 33, stealth: true  },
-  { id: 'fr-par-01', country: 'France',         city: 'Paris',      flag: '🇫🇷', host: 'fr-par-01.distort.net', port: 8443, ping: 49,  load: 60, stealth: true  },
-  { id: 'tr-ist-01', country: 'Turkey',         city: 'Istanbul',   flag: '🇹🇷', host: 'tr-ist-01.distort.net', port: 8443, ping: 78,  load: 71, stealth: true  },
-  { id: 'ae-dxb-01', country: 'UAE',            city: 'Dubai',      flag: '🇦🇪', host: 'ae-dxb-01.distort.net', port: 8443, ping: 96,  load: 65, stealth: true  },
-  { id: 'sg-sin-01', country: 'Singapore',      city: 'Singapore',  flag: '🇸🇬', host: 'sg-sin-01.distort.net', port: 8443, ping: 112, load: 58, stealth: true  },
-  { id: 'jp-tyo-01', country: 'Japan',          city: 'Tokyo',      flag: '🇯🇵', host: 'jp-tyo-01.distort.net', port: 8443, ping: 124, load: 47, stealth: true  },
-  { id: 'ge-tbs-01', country: 'Georgia',        city: 'Tbilisi',    flag: '🇬🇪', host: 'ge-tbs-01.distort.net', port: 8443, ping: 84,  load: 38, stealth: true  },
-  { id: 'am-evn-01', country: 'Armenia',        city: 'Yerevan',    flag: '🇦🇲', host: 'am-evn-01.distort.net', port: 8443, ping: 89,  load: 41, stealth: true  },
-  { id: 'us-nyc-01', country: 'USA',            city: 'New York',   flag: '🇺🇸', host: 'us-nyc-01.distort.net', port: 8443, ping: 102, load: 55, stealth: false },
-  { id: 'uk-lon-01', country: 'UK',             city: 'London',     flag: '🇬🇧', host: 'uk-lon-01.distort.net', port: 8443, ping: 67,  load: 49, stealth: false },
-];
+// --- User-configurable server list (stored in chrome.storage.local) -------------
+let SERVERS = [];  // Loaded from storage; empty until user adds servers.
+
+const DEFAULT_SERVERS = [];  // No hardcoded servers — user must add their own.
 
 const PROTOCOLS = ['wireguard', 'v2ray', 'trojan', 'shadowsocks'];
 const PROTOCOL_LABELS = { wireguard: 'WireGuard', v2ray: 'V2Ray', trojan: 'Trojan', shadowsocks: 'Shadowsocks' };

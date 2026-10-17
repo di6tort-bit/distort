@@ -1,13 +1,18 @@
 // DISTORT — /api/imported-configs/import
 // POST: accept raw text (vmess://, vless://, trojan://, ss:// lines) OR a single URI,
 // parse and persist. Body: { raw: string, source?: string }
+//
+// PROTECTED: Requires authentication if DISTORT_API_KEY is set.
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { importRawConfigs } from "@/lib/subscription-fetcher";
 import { parseConfigUri } from "@/lib/config-parser";
+import { checkAuth } from "@/lib/auth";
 
 export async function POST(req: NextRequest) {
+  const authFail = checkAuth(req);
+  if (authFail) return authFail;
   try {
     const body = await req.json();
     const raw = body?.raw;

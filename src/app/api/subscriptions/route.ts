@@ -1,12 +1,18 @@
 // DISTORT — /api/subscriptions
 // GET: list all subscription sources
 // POST: create a new subscription (auto-fetches immediately)
+//
+// PROTECTED: Subscription URLs may contain sensitive info. If DISTORT_API_KEY
+// env var is set, this endpoint requires authentication.
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { fetchAndParseSubscription } from "@/lib/subscription-fetcher";
+import { checkAuth } from "@/lib/auth";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const authFail = checkAuth(req);
+  if (authFail) return authFail;
   try {
     const subs = await db.subscription.findMany({
       orderBy: { createdAt: "desc" },
@@ -20,6 +26,8 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const authFail = checkAuth(req);
+  if (authFail) return authFail;
   try {
     const body = await req.json();
     const { label, url, kind = "custom", intervalMin = 60, enabled = true, fetchNow = true } = body;

@@ -1,11 +1,17 @@
 // DISTORT — /api/imported-configs
 // GET: list imported configs (filterable by bucket / protocol / favorite)
 // DELETE: clear all (or by subscriptionId)
+//
+// PROTECTED: These configs contain REAL UUIDs/passwords from Community Mesh.
+// If DISTORT_API_KEY env var is set, this endpoint requires authentication.
 
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { checkAuth } from "@/lib/auth";
 
 export async function GET(req: NextRequest) {
+  const authFail = checkAuth(req);
+  if (authFail) return authFail;
   try {
     const url = new URL(req.url);
     const bucket = url.searchParams.get("bucket"); // "optimized" | "all"
